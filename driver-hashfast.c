@@ -1032,10 +1032,15 @@ static void hfa_statline_before(char *buf, size_t bufsiz, struct cgpu_info *hash
 	}
 
 	tailsprintf(buf, bufsiz, " max%3.0fC %3.2fV | ", max_temp, max_volt);
+
+	// Update the temperature in cgpu_info
+	//
+	hashfast->temp = max_temp;
 }
 
 static void hfa_init(struct cgpu_info __maybe_unused *hashfast)
 {
+	hfa_reset(hashfast, hashfast->device_data);
 }
 
 static void hfa_free_all_work(struct hashfast_info *info)

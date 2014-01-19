@@ -82,6 +82,20 @@ int opt_hfa_ntime_roll;
 int opt_hfa_hash_clock;
 bool opt_hfa_pll_bypass;
 bool opt_hfa_dfu_boot;
+
+inline void hfa_set_hash_clock(int dev, int hash_clock) {
+	struct cgpu_info *cgpu = get_devices(dev);
+	opt_hfa_hash_clock = hash_clock;
+	reinit_device(cgpu); }
+inline void hfa_get_serial_number(int dev, char buffer[], size_t buffersize) {
+	struct cgpu_info *cgpu = get_devices(dev);
+
+	rd_lock(&devices_lock);
+	if (cgpu && cgpu->usbdev && cgpu->usbdev->serial_string)
+		snprintf(buffer, buffersize, "%s", cgpu->usbdev->serial_string);
+	else
+		snprintf(buffer, buffersize, "N/A");
+	rd_unlock(&devices_lock); }
 #endif
 
 #if defined(USE_BITFORCE) || defined(USE_ICARUS) || defined(USE_AVALON) || defined(USE_MODMINER)

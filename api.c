@@ -397,6 +397,10 @@ static const char *JSON_PARAMETER = "parameter";
 #define MSG_ASCHELP 118
 #define MSG_ASCSETOK 119
 #define MSG_ASCSETERR 120
+#ifdef USE_HASHFAST
+#define MSG_SETHASHCLOCK 125
+#define MSG_GETHFSERIAL 126
+#endif
 #endif
 
 #define MSG_INVNEG 121
@@ -567,6 +571,10 @@ struct CODES {
  { SEVERITY_INFO,  MSG_ASCHELP, PARAM_BOTH,	"ASC %d set help: %s" },
  { SEVERITY_SUCC,  MSG_ASCSETOK, PARAM_BOTH,	"ASC %d set OK" },
  { SEVERITY_ERR,   MSG_ASCSETERR, PARAM_BOTH,	"ASC %d set failed: %s" },
+#ifdef USE_HASHFAST
+ { SEVERITY_INFO, MSG_SETHASHCLOCK, PARAM_BOTH, "ASC %d clock set to %sMhz" },
+ { SEVERITY_INFO, MSG_GETHFSERIAL, PARAM_BOTH, "ASC %d serial number is %s" },
+#endif
 #endif
  { SEVERITY_SUCC,  MSG_LOCKOK,	PARAM_NONE,	"Lock stats created" },
  { SEVERITY_WARN,  MSG_LOCKDIS,	PARAM_NONE,	"Lock stats not enabled" },
@@ -3728,6 +3736,76 @@ static void ascset(struct io_data *io_data, __maybe_unused SOCKETTYPE c, __maybe
 			message(io_data, MSG_ASCSETOK, id, NULL, isjson);
 	}
 }
+
+#ifdef USE_HASHFAST
+static void aschfsetclock(struct io_data *io_data, __maybe_unused SOCKETTYPE c, __maybe_unused char *param, bool isjson, __maybe_unused char group) 
+{
+	int numasc = numascs();
+
+	if (numasc == 0) {
+		message(io_data, MSG_ASCNON, 0, NULL, isjson);
+		return;
+	}
+
+	if (param == NULL || *param == '\0') {
+		message(io_data, MSG_MISID, 0, NULL, isjson);
+		return;
+	}
+
+	char *opt = strchr(param, ',');
+	if (opt)
+		*(opt++) = '\0';
+	if (!opt || !*opt) {
+		message(io_data, MSG_MISASCOPT, 0, NULL, isjson);
+		return;
+	}
+
+	int hash_clock = atoi(opt);
+
+	int id = atoi(param);
+	if (id < 0 || id >= numasc) {
+		message(io_data, MSG_INVASC, id, NULL, isjson);
+		return;
+	}
+
+	int dev = ascdevice(id);
+	if (dev < 0) { // Should never happen
+		message(io_data, MSG_INVASC, id, NULL, isjson);
+		return;
+	}
+
+	hfa_set_hash_clock(dev, hash_clock);
+	message(io_data, MSG_SETHASHCLOCK, id, opt, isjson);
+}
+
+static void aschfgetserial(struct io_data *io_data, __maybe_unused SOCKETTYPE c, __maybe_unused char *param, bool isjson, __maybe_unused char group)
+{
+	char buf[TMPBUFSIZ];
+	int numasc = numascs();
+
+	if (numasc == 0) {
+		message(io_data, MSG_ASCNON, 0, NULL, isjson);
+		return;
+	}
+
+	if (param == NULL || *param == '\0') {
+		message(io_data, MSG_MISID, 0, NULL, isjson);
+		return;
+	}
+
+	int id = atoi(param);
+	if (id < 0 || id >= numasc) {
+		message(io_data, MSG_INVASC, id, NULL, isjson);
+		return;
+	}
+
+	char serial_number[TMPBUFSIZ];
+	hfa_get_serial_number(id, serial_number, TMPBUFSIZ);
+	snprintf(buf, sizeof(buf), "%s", serial_number);
+
+	message(io_data, MSG_GETHFSERIAL, id, buf, isjson);
+}
+#endif
 #endif
 
 static void checkcommand(struct io_data *io_data, __maybe_unused SOCKETTYPE c, char *param, bool isjson, char group);
@@ -3780,6 +3858,10 @@ struct CMDS {
 	{ "ascdisable",		ascdisable,	true },
 	{ "ascidentify",	ascidentify,	true },
 	{ "ascset",		ascset,		true },
+#ifdef USE_HASHFAST
+	{ "setclock",		aschfsetclock, 	true },
+	{ "getserial",		aschfgetserial,	false },
+#endif
 #endif
 	{ "asccount",		asccount,	false },
 	{ "lockstats",		lockstats,	true },
