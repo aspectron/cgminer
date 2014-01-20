@@ -87,15 +87,15 @@ inline void hfa_set_hash_clock(int dev, int hash_clock) {
 	struct cgpu_info *cgpu = get_devices(dev);
 	opt_hfa_hash_clock = hash_clock;
 	reinit_device(cgpu); }
-inline void hfa_get_serial_number(int dev, char buffer[], size_t buffersize) {
+
+inline int hfa_get_hash_clock(int dev) {
 	struct cgpu_info *cgpu = get_devices(dev);
 
-	rd_lock(&devices_lock);
-	if (cgpu && cgpu->usbdev && cgpu->usbdev->serial_string)
-		snprintf(buffer, buffersize, "%s", cgpu->usbdev->serial_string);
+	if (strcmp(cgpu->drv->name, "HFA") == 0)
+		return ((struct hashfast_info *)cgpu->device_data)->hash_clock_rate;
 	else
-		snprintf(buffer, buffersize, "N/A");
-	rd_unlock(&devices_lock); }
+		return 0; 
+	}
 #endif
 
 #if defined(USE_BITFORCE) || defined(USE_ICARUS) || defined(USE_AVALON) || defined(USE_MODMINER)

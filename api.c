@@ -399,7 +399,6 @@ static const char *JSON_PARAMETER = "parameter";
 #define MSG_ASCSETERR 120
 #ifdef USE_HASHFAST
 #define MSG_SETHASHCLOCK 125
-#define MSG_GETHFSERIAL 126
 #endif
 #endif
 
@@ -573,7 +572,6 @@ struct CODES {
  { SEVERITY_ERR,   MSG_ASCSETERR, PARAM_BOTH,	"ASC %d set failed: %s" },
 #ifdef USE_HASHFAST
  { SEVERITY_INFO, MSG_SETHASHCLOCK, PARAM_BOTH, "ASC %d clock set to %sMhz" },
- { SEVERITY_INFO, MSG_GETHFSERIAL, PARAM_BOTH, "ASC %d serial number is %s" },
 #endif
 #endif
  { SEVERITY_SUCC,  MSG_LOCKOK,	PARAM_NONE,	"Lock stats created" },
@@ -1935,7 +1933,14 @@ static void ascstatus(struct io_data *io_data, int asc, bool isjson, bool precom
 		root = api_add_diff(root, "Last Share Difficulty", &(cgpu->last_share_diff), false);
 #ifdef USE_USBUTILS
 		root = api_add_bool(root, "No Device", &(cgpu->usbinfo.nodev), false);
+		if (cgpu && cgpu->usbdev && cgpu->usbdev->serial_string)
+			root = api_add_string(root, "Serial Number", cgpu->usbdev->serial_string, false);
 #endif
+#ifdef USE_HASHFAST
+		int hash_clock = hfa_get_hash_clock(dev);
+		if (hash_clock)
+			root = api_add_int(root, "Hash Clock", &hash_clock, false);
+#endif		
 		root = api_add_time(root, "Last Valid Work", &(cgpu->last_device_valid_work), false);
 		double hwp = (cgpu->hw_errors + cgpu->diff1) ?
 				(double)(cgpu->hw_errors) / (double)(cgpu->hw_errors + cgpu->diff1) : 0;
@@ -3777,34 +3782,6 @@ static void aschfsetclock(struct io_data *io_data, __maybe_unused SOCKETTYPE c, 
 	hfa_set_hash_clock(dev, hash_clock);
 	message(io_data, MSG_SETHASHCLOCK, id, opt, isjson);
 }
-
-static void aschfgetserial(struct io_data *io_data, __maybe_unused SOCKETTYPE c, __maybe_unused char *param, bool isjson, __maybe_unused char group)
-{
-	char buf[TMPBUFSIZ];
-	int numasc = numascs();
-
-	if (numasc == 0) {
-		message(io_data, MSG_ASCNON, 0, NULL, isjson);
-		return;
-	}
-
-	if (param == NULL || *param == '\0') {
-		message(io_data, MSG_MISID, 0, NULL, isjson);
-		return;
-	}
-
-	int id = atoi(param);
-	if (id < 0 || id >= numasc) {
-		message(io_data, MSG_INVASC, id, NULL, isjson);
-		return;
-	}
-
-	char serial_number[TMPBUFSIZ];
-	hfa_get_serial_number(id, serial_number, TMPBUFSIZ);
-	snprintf(buf, sizeof(buf), "%s", serial_number);
-
-	message(io_data, MSG_GETHFSERIAL, id, buf, isjson);
-}
 #endif
 #endif
 
@@ -3860,7 +3837,6 @@ struct CMDS {
 	{ "ascset",		ascset,		true },
 #ifdef USE_HASHFAST
 	{ "setclock",		aschfsetclock, 	true },
-	{ "getserial",		aschfgetserial,	false },
 #endif
 #endif
 	{ "asccount",		asccount,	false },

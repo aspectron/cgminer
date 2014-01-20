@@ -1032,10 +1032,28 @@ static void hfa_statline_before(char *buf, size_t bufsiz, struct cgpu_info *hash
 	}
 
 	tailsprintf(buf, bufsiz, " max%3.0fC %3.2fV | ", max_temp, max_volt);
+}
 
-	// Update the temperature in cgpu_info
-	//
-	hashfast->temp = max_temp;
+static bool hfa_get_stats(struct cgpu_info *cgpu)
+{
+	struct hashfast_info *info = cgpu->device_data;
+	int i;
+	double max_temp;
+
+	// Device is gone
+	if (cgpu->usbinfo.nodev)
+		return false;
+
+	for (i = 0; i < info->asic_count; i++) {
+		struct hf_g1_die_data *d = &info->die_status[i];
+		
+		double die_temp = GN_DIE_TEMPERATURE(d->die.die_temperature);
+		if (die_temp > max_temp)
+			max_temp = die_temp;
+	}
+
+	cgpu->temp = max_temp;
+	return true;
 }
 
 static void hfa_init(struct cgpu_info __maybe_unused *hashfast)
@@ -1084,6 +1102,7 @@ struct device_drv hashfast_drv = {
 	.scanwork = hfa_scanwork,
 	.get_api_stats = hfa_api_stats,
 	.get_statline_before = hfa_statline_before,
+	.get_stats = hfa_get_stats,
 	.reinit_device = hfa_init,
 	.thread_shutdown = hfa_shutdown,
 };
