@@ -2343,6 +2343,7 @@ static void poolstatus(struct io_data *io_data, __maybe_unused SOCKETTYPE c, __m
 		root = api_add_escape(root, "User", pool->rpc_user, false);
 		root = api_add_time(root, "Last Share Time", &(pool->last_share_time), false);
 		root = api_add_int(root, "Diff1 Shares", &(pool->diff1), false);
+		root = api_add_double(root, "Utility", &(pool->utility), false);
 		if (pool->rpc_proxy) {
 			root = api_add_const(root, "Proxy Type", proxytype(pool->rpc_proxytype), false);
 			root = api_add_escape(root, "Proxy", pool->rpc_proxy, false);
