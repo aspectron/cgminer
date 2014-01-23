@@ -38,7 +38,7 @@
 //  data is truncated at the end of the last record that fits
 //	but still closed correctly for JSON
 // Current code assumes it can socket send this size + JSON_CLOSE + JSON_END
-#define SOCKBUFSIZ	65432
+#define SOCKBUFSIZ	1024*1024
 
 // BUFSIZ varies on Windows and Linux
 #define TMPBUFSIZ	8192
@@ -3887,7 +3887,7 @@ static void checkcommand(struct io_data *io_data, __maybe_unused SOCKETTYPE c, c
 static void send_result(struct io_data *io_data, SOCKETTYPE c, bool isjson)
 {
 	char buf[SOCKBUFSIZ + sizeof(JSON_CLOSE) + sizeof(JSON_END)];
-	int count, res, tosend, len, n;
+	int count, res, tosend, len, n, sent;
 
 	strcpy(buf, io_data->ptr);
 
@@ -3903,13 +3903,14 @@ static void send_result(struct io_data *io_data, SOCKETTYPE c, bool isjson)
 
 	len = strlen(buf);
 	tosend = len+1;
+	sent = 0;
 
 	applog(LOG_DEBUG, "API: send reply: (%d) '%.10s%s'", tosend, buf, len > 10 ? "..." : BLANK);
 
 	count = 0;
-	while (count++ < 5 && tosend > 0) {
-		// allow 50ms per attempt
-		struct timeval timeout = {0, 50000};
+	while (count++ < 20 && tosend > 0) {
+		// allow 100ms per attempt
+		struct timeval timeout = {0, 100000};
 		fd_set wd;
 
 		FD_ZERO(&wd);
@@ -3919,7 +3920,7 @@ static void send_result(struct io_data *io_data, SOCKETTYPE c, bool isjson)
 			return;
 		}
 
-		n = send(c, buf, tosend, 0);
+		n = send(c, buf+sent, tosend, 0);
 
 		if (SOCKETFAIL(n)) {
 			if (sock_blocks())
@@ -3942,6 +3943,7 @@ static void send_result(struct io_data *io_data, SOCKETTYPE c, bool isjson)
 			}
 
 			tosend -= n;
+			sent += n;
 		}
 	}
 }
