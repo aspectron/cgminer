@@ -24,6 +24,7 @@
 #define BXF_TEMP_HYSTERESIS 30
 
 extern int opt_bxf_temp_target;
+extern int opt_nf1_bits;
 
 #define NF1_PIN_LED 0
 #define NF1_PIN_SCK_OVR 5
@@ -85,8 +86,8 @@ struct bitfury_info {
 	struct bitfury_payload opayload;
 	unsigned newbuf[17];
 	unsigned oldbuf[17];
-	int job_switched;
-	unsigned int results[16];
+	bool job_switched;
+	bool second_run;
 	struct work *work;
 	struct work *owork;
 };

@@ -511,6 +511,16 @@ static struct usb_find_devices find_dev[] = {
 		INTINFO(amu_ints) },
 	{
 		.drv = DRIVER_icarus,
+		.name = "ANU",
+		.ident = IDENT_ANU,
+		.idVendor = 0x10c4,
+		.idProduct = 0xea60,
+		.config = 1,
+		.timeout = ICARUS_TIMEOUT_MS,
+		.latency = LATENCY_UNUSED,
+		INTINFO(amu_ints) },
+	{
+		.drv = DRIVER_icarus,
 		.name = "BLT",
 		.ident = IDENT_BLT,
 		.idVendor = IDVENDOR_FTDI,
@@ -561,15 +571,6 @@ static struct usb_find_devices find_dev[] = {
 static const char *BLANK = "";
 static const char *space = " ";
 static const char *nodatareturned = "no data returned ";
-
-/* Fake success on IO errors allowing code to retry up to USB_RETRY_MAX */
-#define IOERR_CHECK(cgpu, err) \
-		if (err == LIBUSB_ERROR_IO) { \
-			cgpu->usbinfo.ioerr_count++; \
-			if (++cgpu->usbinfo.continuous_ioerr_count < USB_RETRY_MAX) \
-				err = LIBUSB_SUCCESS; \
-		} else \
-			cgpu->usbinfo.continuous_ioerr_count = 0;
 
 #if 0 // enable USBDEBUG - only during development testing
  static const char *debug_true_str = "true";
@@ -2493,7 +2494,7 @@ usb_perform_transfer(struct cgpu_info *cgpu, struct cg_usb_device *usbdev, int i
 		  unsigned int timeout, __maybe_unused int mode, enum usb_cmds cmd,
 		  __maybe_unused int seq, bool cancellable, bool tt)
 {
-	int bulk_timeout, callback_timeout = timeout, pipe_retries = 0;
+	int bulk_timeout, callback_timeout = timeout, err_retries = 0;
 	struct libusb_device_handle *dev_handle = usbdev->handle;
 	struct usb_epinfo *usb_epinfo;
 	struct usb_transfer ut;
@@ -2522,7 +2523,7 @@ usb_perform_transfer(struct cgpu_info *cgpu, struct cg_usb_device *usbdev, int i
 	 * thread to be shut down after all existing transfers are complete */
 	if (opt_lowmem || cgpu->shutdown)
 		return libusb_bulk_transfer(dev_handle, endpoint, data, length, transferred, timeout);
-pipe_retry:
+err_retry:
 	init_usb_transfer(&ut);
 
 	if ((endpoint & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_OUT) {
@@ -2572,24 +2573,26 @@ pipe_retry:
 	}
 
 	if (err == LIBUSB_ERROR_PIPE) {
-		int retries = 0;
+		int pipeerr, retries = 0;
 
 		do {
 			cgpu->usbinfo.last_pipe = time(NULL);
 			cgpu->usbinfo.pipe_count++;
 			applog(LOG_INFO, "%s%i: libusb pipe error, trying to clear",
 				cgpu->drv->name, cgpu->device_id);
-			err = libusb_clear_halt(dev_handle, endpoint);
+			pipeerr = libusb_clear_halt(dev_handle, endpoint);
 			applog(LOG_DEBUG, "%s%i: libusb pipe error%scleared",
 				cgpu->drv->name, cgpu->device_id, err ? " not " : " ");
 
-			if (err)
+			if (pipeerr)
 				cgpu->usbinfo.clear_fail_count++;
-		} while (err && ++retries < USB_RETRY_MAX);
-		if (!err && ++pipe_retries < USB_RETRY_MAX)
-			goto pipe_retry;
+		} while (pipeerr && ++retries < USB_RETRY_MAX);
+		if (!pipeerr && ++err_retries < USB_RETRY_MAX)
+			goto err_retry;
 	}
-	if ((endpoint & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_IN)
+	if (err == LIBUSB_ERROR_IO && ++err_retries < USB_RETRY_MAX)
+		goto err_retry;
+	if (*transferred && (endpoint & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_IN)
 		memcpy(data, buf, *transferred);
 
 	return err;
@@ -2664,8 +2667,6 @@ int _usb_read(struct cgpu_info *cgpu, int intinfo, int epinfo, char *buf, size_t
 
 		USBDEBUG("USB debug: @_usb_read(%s (nodev=%s)) first=%s err=%d%s got=%d ptr='%s' usbbufread=%d", cgpu->drv->name, bool_str(cgpu->usbinfo.nodev), bool_str(first), err, isnodev(err), got, (char *)str_text((char *)ptr), (int)usbbufread);
 
-		IOERR_CHECK(cgpu, err);
-
 		if (ftdi) {
 			// first 2 bytes returned are an FTDI status
 			if (got > 2) {
@@ -2687,7 +2688,7 @@ int _usb_read(struct cgpu_info *cgpu, int intinfo, int epinfo, char *buf, size_t
 		if (err && err != LIBUSB_ERROR_TIMEOUT) {
 			applog(LOG_WARNING, "%s %i %s usb read err:(%d) %s", cgpu->drv->name,
 			       cgpu->device_id, usb_cmdname(cmd), err, libusb_error_name(err));
-			if (err != LIBUSB_ERROR_NO_DEVICE) {
+			if (err != LIBUSB_ERROR_NO_DEVICE && err != LIBUSB_ERROR_PIPE) {
 				err = libusb_reset_device(usbdev->handle);
 				applog(LOG_WARNING, "%s %i attempted reset got err:(%d) %s",
 				       cgpu->drv->name, cgpu->device_id, err, libusb_error_name(err));
@@ -2800,21 +2801,8 @@ int _usb_write(struct cgpu_info *cgpu, int intinfo, int epinfo, char *buf, size_
 
 		USBDEBUG("USB debug: @_usb_write(%s (nodev=%s)) err=%d%s sent=%d", cgpu->drv->name, bool_str(cgpu->usbinfo.nodev), err, isnodev(err), sent);
 
-		IOERR_CHECK(cgpu, err);
-
 		tot += sent;
 
-		/* Unlike reads, even a timeout error is unrecoverable on
-		 * writes. */
-		if (err) {
-			applog(LOG_WARNING, "%s %i %s usb write err:(%d) %s", cgpu->drv->name,
-			       cgpu->device_id, usb_cmdname(cmd), err, libusb_error_name(err));
-			if (err != LIBUSB_ERROR_NO_DEVICE) {
-				err = libusb_reset_device(usbdev->handle);
-				applog(LOG_WARNING, "%s %i attempted reset got err:(%d) %s",
-				       cgpu->drv->name, cgpu->device_id, err, libusb_error_name(err));
-			}
-		}
 		if (err)
 			break;
 
@@ -2926,8 +2914,6 @@ int __usb_transfer(struct cgpu_info *cgpu, uint8_t request_type, uint8_t bReques
 
 	USBDEBUG("USB debug: @_usb_transfer(%s (nodev=%s)) err=%d%s", cgpu->drv->name, bool_str(cgpu->usbinfo.nodev), err, isnodev(err));
 
-	IOERR_CHECK(cgpu, err);
-
 	if (err < 0 && err != LIBUSB_ERROR_TIMEOUT) {
 		applog(LOG_WARNING, "%s %i usb transfer err:(%d) %s", cgpu->drv->name, cgpu->device_id,
 		       err, libusb_error_name(err));
@@ -2990,8 +2976,6 @@ int _usb_transfer_read(struct cgpu_info *cgpu, uint8_t request_type, uint8_t bRe
 	memcpy(buf, tbuf, bufsiz);
 
 	USBDEBUG("USB debug: @_usb_transfer_read(%s (nodev=%s)) amt/err=%d%s%s%s", cgpu->drv->name, bool_str(cgpu->usbinfo.nodev), err, isnodev(err), err > 0 ? " = " : BLANK, err > 0 ? bin2hex((unsigned char *)buf, (size_t)err) : BLANK);
-
-	IOERR_CHECK(cgpu, err);
 
 	if (err > 0) {
 		*amount = err;
@@ -3716,7 +3700,7 @@ void *usb_resource_thread(void __maybe_unused *userdata)
 {
 	pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 
-	RenameThread("usbresource");
+	RenameThread("USBResource");
 
 	applog(LOG_DEBUG, "RES: thread starting");
 

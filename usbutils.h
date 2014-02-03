@@ -135,6 +135,7 @@ struct usb_intinfo {
 enum sub_ident {
 	IDENT_UNK = 0,
 	IDENT_AMU,
+	IDENT_ANU,
 	IDENT_AVA,
 	IDENT_BAJ,
 	IDENT_BAL,
@@ -384,6 +385,8 @@ struct cg_usb_info {
 	USB_ADD_COMMAND(C_HF_WORK_RESTART, "HFWorkRestart") \
 	USB_ADD_COMMAND(C_HF_GWQSTATS, "HFGWQStats") \
 	USB_ADD_COMMAND(C_HF_NOTICE, "HFNotice") \
+	USB_ADD_COMMAND(C_HF_PING, "HFPing") \
+	USB_ADD_COMMAND(C_HF_FAN, "HFFan") \
 	USB_ADD_COMMAND(C_HF_GETHEADER, "HFGetHeader") \
 	USB_ADD_COMMAND(C_HF_GETDATA, "HFGetData") \
 	USB_ADD_COMMAND(C_HF_CLEAR_READ, "HFClearRead") \
