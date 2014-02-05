@@ -1234,6 +1234,9 @@ struct pool {
 	int merkle_offset;
 
 	struct timeval tv_lastwork;
+
+	/* ECH contract ID for the pool */
+	char *cuuid;
 };
 
 #define GETWORK_MODE_TESTPOOL 'T'

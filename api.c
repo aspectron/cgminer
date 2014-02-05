@@ -408,6 +408,7 @@ static const char *JSON_PARAMETER = "parameter";
 #define MSG_SETQUOTA 122
 #define MSG_LOCKOK 123
 #define MSG_LOCKDIS 124
+#define MSG_CUUIDPL 125
 
 enum code_severity {
 	SEVERITY_ERR,
@@ -500,6 +501,7 @@ struct CODES {
  { SEVERITY_ERR,   MSG_ACCDENY,	PARAM_STR,	"Access denied to '%s' command" },
  { SEVERITY_SUCC,  MSG_ACCOK,	PARAM_NONE,	"Privileged access OK" },
  { SEVERITY_SUCC,  MSG_ENAPOOL,	PARAM_POOL,	"Enabling pool %d:'%s'" },
+ { SEVERITY_SUCC,  MSG_CUUIDPL, PARAM_BOTH,  "Setting pool %d CUUID:'%s'" },
  { SEVERITY_SUCC,  MSG_POOLPRIO,PARAM_NONE,	"Changed pool priorities" },
  { SEVERITY_ERR,   MSG_DUPPID,	PARAM_PID,	"Duplicate pool specified %d" },
  { SEVERITY_SUCC,  MSG_DISPOOL,	PARAM_POOL,	"Disabling pool %d:'%s'" },
@@ -2431,6 +2433,8 @@ static void poolstatus(struct io_data *io_data, __maybe_unused SOCKETTYPE c, __m
 		double stalep = (pool->diff_accepted + pool->diff_rejected + pool->diff_stale) ?
 				(double)(pool->diff_stale) / (double)(pool->diff_accepted + pool->diff_rejected + pool->diff_stale) : 0;
 		root = api_add_percent(root, "Pool Stale%", &stalep, false);
+		if (pool->cuuid)
+			root = api_add_string(root, "CUUID", pool->cuuid, false);
 
 		root = print_data(io_data, root, isjson, isjson && (i > 0));
 	}
@@ -2666,6 +2670,42 @@ static void enablepool(struct io_data *io_data, __maybe_unused SOCKETTYPE c, cha
 		switch_pools(pool);
 
 	message(io_data, MSG_ENAPOOL, id, NULL, isjson);
+}
+
+static void poolcuuid(struct io_data *io_data, __maybe_unused SOCKETTYPE c, char *param, bool isjson, __maybe_unused char group)
+{
+	struct pool *pool;
+	char *ptr, *cuuid;
+	int id;
+
+	if (total_pools == 0) {
+		message(io_data, MSG_NOPOOL, 0, NULL, isjson);
+		return;
+	}
+
+	ptr = strchr(param, ',');
+	if (ptr)
+		*(ptr++) = '\0';
+
+	id = atoi(param);
+	if (id < 0 || id >= total_pools) {
+		message(io_data, MSG_INVPID, id, NULL, isjson);
+		return;
+	}
+
+	cuuid = malloc(strlen(ptr) + 1);
+	if (unlikely(!cuuid))
+		quit(1, "Failed to malloc new pool cuuid");
+
+	strcpy(cuuid, ptr);
+
+	pool = pools[id];
+	if (pool->cuuid)
+		free(pool->cuuid);
+
+	pool->cuuid = cuuid;
+
+	message(io_data, MSG_CUUIDPL, id, cuuid, isjson);
 }
 
 static void poolpriority(struct io_data *io_data, __maybe_unused SOCKETTYPE c, char *param, bool isjson, __maybe_unused char group)
@@ -3854,6 +3894,7 @@ struct CMDS {
 	{ "poolpriority",	poolpriority,	true,	false },
 	{ "poolquota",		poolquota,	true,	false },
 	{ "enablepool",		enablepool,	true,	false },
+	{ "poolcuuid",		poolcuuid,	true,	false },
 	{ "disablepool",	disablepool,	true,	false },
 	{ "removepool",		removepool,	true,	false },
 	{ "save",		dosave,		true,	false },

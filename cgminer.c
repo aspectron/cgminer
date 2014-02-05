@@ -78,10 +78,6 @@ char *curly = ":D";
 
 #ifdef USE_HASHFAST
 #include "driver-hashfast.h"
-int opt_hfa_ntime_roll;
-int opt_hfa_hash_clock;
-bool opt_hfa_pll_bypass;
-bool opt_hfa_dfu_boot;
 
 inline void hfa_set_hash_clock(int dev, int hash_clock) {
 	struct cgpu_info *cgpu = get_devices(dev);
@@ -91,7 +87,9 @@ inline void hfa_set_hash_clock(int dev, int hash_clock) {
 inline int hfa_get_hash_clock(int dev) {
 	struct cgpu_info *cgpu = get_devices(dev);
 
-	if (strcmp(cgpu->drv->name, "HFA") == 0)
+	if (strcmp(cgpu->drv->name, "HFA") == 0 ||
+		strcmp(cgpu->drv->name, "HFB") == 0 ||
+		strcmp(cgpu->drv->name, "HFS") == 0)
 		return ((struct hashfast_info *)cgpu->device_data)->hash_clock_rate;
 	else
 		return 0; 
@@ -572,6 +570,9 @@ struct pool *add_pool(void)
 	pool = calloc(sizeof(struct pool), 1);
 	if (!pool)
 		quit(1, "Failed to malloc pool in add_pool");
+
+	memset(pool, 0, sizeof(struct pool));
+
 	pool->pool_no = pool->prio = total_pools;
 	pools = realloc(pools, sizeof(struct pool *) * (total_pools + 2));
 	pools[total_pools++] = pool;
