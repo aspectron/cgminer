@@ -36,6 +36,30 @@ int opt_hfa_fan_min = HFA_FAN_MIN;
 #define DI8  0x07
 
 static bool hfa_crc8_set;
+
+char *set_hfa_fan(char *arg)
+{
+	int val1, val2, ret;
+
+	ret = sscanf(arg, "%d-%d", &val1, &val2);
+	if (ret < 1)
+		return "No values passed to hfa-fan";
+	if (ret == 1)
+		val2 = val1;
+
+	if (val1 < 0 || val1 > 100 || val2 < 0 || val2 > 100 || val2 < val1)
+		return "Invalid value passed to hfa-fan";
+
+	opt_hfa_fan_min = val1;
+	opt_hfa_fan_max = val2;
+	if (opt_hfa_fan_min > opt_hfa_fan_default)
+		opt_hfa_fan_default = opt_hfa_fan_min;
+	if (opt_hfa_fan_max < opt_hfa_fan_default)
+		opt_hfa_fan_default = opt_hfa_fan_max;
+
+	return NULL;
+}
+
 static unsigned char crc8_table[256];	/* CRC-8 table */
 
 static void hfa_init_crc8(void)
@@ -146,7 +170,7 @@ retry:
 	}
 
 	if (retried)
-		applog(LOG_ERR, "%s %d: hfa_send_frame: recovered OK", hashfast->drv->name, id);
+		applog(LOG_WARNING, "%s %d: hfa_send_frame: recovered OK", hashfast->drv->name, id);
 
 	return true;
 }
@@ -389,7 +413,7 @@ tryagain:
 	       (db->firmware_rev >> 8) & 0xff, db->firmware_rev & 0xff);
 	applog(LOG_INFO, "%s %d:      hardware_rev:    %d.%d", hashfast->drv->name, hashfast->device_id,
 	       (db->hardware_rev >> 8) & 0xff, db->hardware_rev & 0xff);
-	applog(LOG_INFO, "%s %d:      serial number:   %d", hashfast->drv->name, hashfast->device_id,
+	applog(LOG_INFO, "%s %d:      serial number:   0x%08x", hashfast->drv->name, hashfast->device_id,
 	       db->serial_number);
 	applog(LOG_INFO, "%s %d:      hash clockrate:  %d Mhz", hashfast->drv->name, hashfast->device_id,
 	       db->hash_clockrate);
@@ -417,7 +441,7 @@ tryagain:
 
 	// See if the initialization suceeded
 	if (db->operation_status) {
-		applog(LOG_WARNING, "%s %d: OP_USB_INIT failed! Operation status %d (%s)",
+		applog(LOG_ERR, "%s %d: OP_USB_INIT failed! Operation status %d (%s)",
 		       hashfast->drv->name, hashfast->device_id, db->operation_status,
 			(db->operation_status < sizeof(hf_usb_init_errors)/sizeof(hf_usb_init_errors[0])) ?
 			hf_usb_init_errors[db->operation_status] : "Unknown error code");
@@ -432,6 +456,8 @@ static void hfa_send_shutdown(struct cgpu_info *hashfast)
 	if (hashfast->usbinfo.nodev)
 		return;
 	hfa_send_frame(hashfast, HF_USB_CMD(OP_USB_SHUTDOWN), 0, NULL, 0);
+	/* Wait to allow device to properly shut down. */
+	cgsleep_ms(1000);
 }
 
 static void hfa_clear_readbuf(struct cgpu_info *hashfast)
@@ -618,7 +644,7 @@ static void hfa_parse_gwq_status(struct cgpu_info *hashfast, struct hashfast_inf
 
 	/* This is a special flag that the thermal overload has been tripped */
 	if (unlikely(h->core_address & 0x80)) {
-		applog(LOG_WARNING, "%s %d Thermal overload tripped! Resetting device",
+		applog(LOG_ERR, "%s %d Thermal overload tripped! Resetting device",
 		       hashfast->drv->name, hashfast->device_id);
 		hfa_send_shutdown(hashfast);
 		if (hfa_reset(hashfast, info)) {
@@ -678,7 +704,7 @@ static void hfa_update_die_status(struct cgpu_info *hashfast, struct hashfast_in
 {
 	struct hf_g1_die_data *d = (struct hf_g1_die_data *)(h + 1), *ds;
 	int num_included = (h->data_length * 4) / sizeof(struct hf_g1_die_data);
-	int i, j;
+	int i, j, die = h->chip_address;
 
 	float die_temperature;
 	float core_voltage[6];
@@ -688,17 +714,13 @@ static void hfa_update_die_status(struct cgpu_info *hashfast, struct hashfast_in
 	for (i = 0; i < num_included; i++)
 		memcpy(ds++, d++, sizeof(struct hf_g1_die_data));
 
-	info->max_temp = 0;
 	for (i = 0, d = &info->die_status[h->chip_address]; i < num_included; i++, d++) {
-		int die = h->chip_address + i;
-
+		die += i;
 		die_temperature = GN_DIE_TEMPERATURE(d->die.die_temperature);
 		/* Sanity checking */
 		if (unlikely(die_temperature > 255))
 			die_temperature = info->die_data[die].temp;
 		info->die_data[die].temp = die_temperature;
-		if (die_temperature > info->max_temp)
-			info->max_temp = die_temperature;
 		for (j = 0; j < 6; j++)
 			core_voltage[j] = GN_CORE_VOLTAGE(d->die.core_voltage[j]);
 
@@ -707,6 +729,18 @@ static void hfa_update_die_status(struct cgpu_info *hashfast, struct hashfast_in
 			core_voltage[0], core_voltage[1], core_voltage[2],
 			core_voltage[3], core_voltage[4], core_voltage[5]);
 		// XXX Convert board phase currents, voltage, temperature
+	}
+	if (die == info->asic_count - 1) {
+		info->temp_updates++;
+		/* We have a full set of die temperatures, find the highest
+		 * current die temp. */
+		die_temperature = 0;
+		for (die = 0; die < info->asic_count; die++) {
+			if (info->die_data[die].temp > die_temperature)
+				die_temperature = info->die_data[die].temp;
+		}
+		/* Exponentially change the max_temp to smooth out troughs. */
+		info->max_temp = info->max_temp * 0.63 + die_temperature * 0.37;
 	}
 
 	if (unlikely(info->max_temp >= opt_hfa_overheat)) {
@@ -904,6 +938,12 @@ static void *hfa_read(void *arg)
 				/* Do nothing */
 				break;
 			default:
+				if (h->operation_code == OP_FAN) {
+					applog(LOG_NOTICE, "%s %d: Firmware upgrade required to support fan control",
+					       hashfast->drv->name, hashfast->device_id);
+					opt_hfa_target = 0;
+					break;
+				}
 				applog(LOG_WARNING, "%s %d: Unhandled operation code %d",
 				       hashfast->drv->name, hashfast->device_id, h->operation_code);
 				break;
@@ -1001,16 +1041,38 @@ static void hfa_set_fanspeed(struct cgpu_info *hashfast, struct hashfast_info *i
 static void hfa_increase_clock(struct cgpu_info *hashfast, struct hashfast_info *info,
 			       int die)
 {
+	int i, high_clock = 0, low_clock = info->hash_clock_rate;
 	struct hf_die_data *hdd = &info->die_data[die];
 	uint32_t diebit = 0x00000001ul << die;
-	uint16_t hdata, increase = 5;
+	uint16_t hdata, increase = 10;
 
 	if (hdd->hash_clock + increase > info->hash_clock_rate)
 		increase = info->hash_clock_rate - hdd->hash_clock;
 	hdd->hash_clock += increase;
+	hdata = (WR_MHZ_INCREASE << 12) | increase;
+	if (info->clock_offset) {
+		for (i = 0; i < info->asic_count; i++) {
+			if (info->die_data[i].hash_clock > high_clock)
+				high_clock = info->die_data[i].hash_clock;
+			if (info->die_data[i].hash_clock < low_clock)
+				low_clock = info->die_data[i].hash_clock;
+		}
+		if (low_clock + HFA_CLOCK_MAXDIFF > high_clock) {
+			/* We can increase all clocks again */
+			for (i = 0; i < info->asic_count; i++) {
+				if (i == die) /* We've already added to this die */
+					continue;
+				info->die_data[i].hash_clock += increase;
+			}
+			applog(LOG_INFO, "%s %d: Die %d temp below range %.1f, increasing ALL dies by %d",
+			       hashfast->drv->name, hashfast->device_id, die, info->die_data[die].temp, increase);
+			hfa_send_frame(hashfast, HF_USB_CMD(OP_WORK_RESTART), hdata, (uint8_t *)NULL, 0);
+			info->clock_offset -= increase;
+			return;
+		}
+	}
 	applog(LOG_INFO, "%s %d: Die temp below range %.1f, increasing die %d clock to %d",
 	       hashfast->drv->name, hashfast->device_id, info->die_data[die].temp, die, hdd->hash_clock);
-	hdata = (WR_MHZ_INCREASE << 12) | increase;
 	hfa_send_frame(hashfast, HF_USB_CMD(OP_WORK_RESTART), hdata, (uint8_t *)&diebit, 4);
 }
 
@@ -1019,14 +1081,33 @@ static void hfa_decrease_clock(struct cgpu_info *hashfast, struct hashfast_info 
 {
 	struct hf_die_data *hdd = &info->die_data[die];
 	uint32_t diebit = 0x00000001ul << die;
-	uint16_t hdata, decrease = 10;
+	uint16_t hdata, decrease = 20;
+	int i, high_clock = 0;
 
+	/* Find the fastest die for comparison */
+	for (i = 0; i < info->asic_count; i++) {
+		if (info->die_data[i].hash_clock > high_clock)
+			high_clock = info->die_data[i].hash_clock;
+	}
 	if (hdd->hash_clock - decrease < HFA_CLOCK_MIN)
 		decrease = hdd->hash_clock - HFA_CLOCK_MIN;
+	hdata = (WR_MHZ_DECREASE << 12) | decrease;
+	if (high_clock >= hdd->hash_clock + HFA_CLOCK_MAXDIFF) {
+		/* We can't have huge differences in clocks as it will lead to
+		 * starvation of the faster cores so we have no choice but to
+		 * slow down all dies to tame this one. */
+		for (i = 0; i < info->asic_count; i++)
+			info->die_data[i].hash_clock -= decrease;
+		applog(LOG_INFO, "%s %d: Die %d temp above range %.1f, decreasing ALL die clocks by %d",
+		       hashfast->drv->name, hashfast->device_id, die, info->die_data[die].temp, decrease);
+		hfa_send_frame(hashfast, HF_USB_CMD(OP_WORK_RESTART), hdata, (uint8_t *)NULL, 0);
+		info->clock_offset += decrease;
+		return;
+
+	}
 	hdd->hash_clock -= decrease;
 	applog(LOG_INFO, "%s %d: Die temp above range %.1f, decreasing die %d clock to %d",
 	       hashfast->drv->name, hashfast->device_id, info->die_data[die].temp, die, hdd->hash_clock);
-	hdata = (WR_MHZ_DECREASE << 12) | decrease;
 	hfa_send_frame(hashfast, HF_USB_CMD(OP_WORK_RESTART), hdata, (uint8_t *)&diebit, 4);
 }
 
@@ -1034,25 +1115,29 @@ static void hfa_decrease_clock(struct cgpu_info *hashfast, struct hashfast_info 
  * setting and issuing a work restart with the new clock speed. */
 static void hfa_temp_clock(struct cgpu_info *hashfast, struct hashfast_info *info)
 {
+	int temp_change, i, low_clock;
 	time_t now_t = time(NULL);
 	bool throttled = false;
-	int temp_change, i;
 
 	if (!opt_hfa_target)
 		return;
 
 	/* First find out if any dies are throttled before trying to optimise
-	 * fanspeed */
+	 * fanspeed, and find the slowest clock. */
+	low_clock = info->hash_clock_rate;
 	for (i = 0; i < info->asic_count ; i++) {
 		struct hf_die_data *hdd = &info->die_data[i];
 
-		if (hdd->hash_clock < info->hash_clock_rate) {
+		if (hdd->hash_clock < info->hash_clock_rate)
 			throttled = true;
-			break;
-		}
+		if (hdd->hash_clock < low_clock)
+			low_clock = hdd->hash_clock;
 	}
 
 	/* Find the direction of temperature change since we last checked */
+	if (info->temp_updates < 5)
+		goto dies_only;
+	info->temp_updates = 0;
 	temp_change = info->max_temp - info->last_max_temp;
 	info->last_max_temp = info->max_temp;
 
@@ -1083,17 +1168,15 @@ static void hfa_temp_clock(struct cgpu_info *hashfast, struct hashfast_info *inf
 		}
 	}
 
+dies_only:
 	/* Do no restarts at all if there has been one less than 15 seconds
 	 * ago */
 	if (now_t - info->last_restart < 15)
 		return;
 
-	for (i = 0; i < info->asic_count ; i++) {
-		struct hf_die_data *hdd = &info->die_data[i];
-
-		/* Only send a restart no more than every 30 seconds. */
-		if (now_t - hdd->last_restart < 30)
-			continue;
+	for (i = 1; i <= info->asic_count ; i++) {
+		int die = (info->last_die_adjusted + i) % info->asic_count;
+		struct hf_die_data *hdd = &info->die_data[die];
 
 		/* Sanity check */
 		if (unlikely(hdd->temp == 0.0 || hdd->temp > 255))
@@ -1109,16 +1192,31 @@ static void hfa_temp_clock(struct cgpu_info *hashfast, struct hashfast_info *inf
 			/* Already at min speed */
 			if (hdd->hash_clock == HFA_CLOCK_MIN)
 				continue;
-			hfa_decrease_clock(hashfast, info, i);
+			/* Have some leeway before throttling speed */
+			if (hdd->temp < opt_hfa_target + HFA_TEMP_HYSTERESIS)
+				break;
+			hfa_decrease_clock(hashfast, info, die);
 		} else {
-			/* Temp below target range.*/
+			/* Temp below target range. Only send a restart to
+			 * increase speed no more than every 60 seconds. */
+			if (now_t - hdd->last_restart < 60)
+				continue;
 
 			/* Already at max speed */
 			if (hdd->hash_clock == info->hash_clock_rate)
 				continue;
-			hfa_increase_clock(hashfast, info, i);
+			/* Do not increase the clocks on any dies if we have
+			 * a forced offset due to wild differences in clocks,
+			 * unless this is the slowest one. */
+			if (info->clock_offset && hdd->hash_clock > low_clock)
+				continue;
+			hfa_increase_clock(hashfast, info, die);
 		}
+		/* Keep track of the last die adjusted since we only adjust
+		 * one at a time to ensure we end up iterating over all of
+		 * them. */
 		info->last_restart = hdd->last_restart = now_t;
+		info->last_die_adjusted = die;
 		break;
 	}
 }
@@ -1140,7 +1238,7 @@ static int64_t hfa_scanwork(struct thr_info *thr)
 		applog(LOG_WARNING, "%s %d: No valid hashes for over 1 minute, attempting to reset",
 		       hashfast->drv->name, hashfast->device_id);
 		if (info->hash_clock_rate > HFA_CLOCK_DEFAULT) {
-			info->hash_clock_rate -= 5;
+			info->hash_clock_rate -= 10;
 			if (info->hash_clock_rate < opt_hfa_hash_clock)
 				opt_hfa_hash_clock = info->hash_clock_rate;
 			applog(LOG_WARNING, "%s %d: Decreasing clock speed to %d with reset",
@@ -1155,8 +1253,6 @@ static int64_t hfa_scanwork(struct thr_info *thr)
 		applog(LOG_NOTICE, "%s %d: Reset successful", hashfast->drv->name,
 		       hashfast->device_id);
 	}
-
-	hfa_temp_clock(hashfast, info);
 
 	if (unlikely(thr->work_restart)) {
 restart:
@@ -1174,8 +1270,12 @@ restart:
 		/* Give a full allotment of jobs after a restart, not waiting
 		 * for the status update telling us how much to give. */
 		jobs = info->usb_init_base.inflight_target;
-	} else
+	} else {
+		/* Only adjust die clocks if there's no restart since two
+		 * restarts back to back get ignored. */
+		hfa_temp_clock(hashfast, info);
 		jobs = hfa_jobs(hashfast, info);
+	}
 
 	/* Wait on restart_wait for up to 0.5 seconds or submit jobs as soon as
 	 * they're required. */
@@ -1319,6 +1419,7 @@ static struct api_data *hfa_api_stats(struct cgpu_info *cgpu)
 
 	root = api_add_uint64(root, "raw hashcount", &info->raw_hashes, false);
 	root = api_add_uint64(root, "calc hashcount", &info->calc_hashes, false);
+	root = api_add_int(root, "no matching work", &info->no_matching_work, false);
 	root = api_add_int(root, "resets", &info->resets, false);
 
 	return root;
