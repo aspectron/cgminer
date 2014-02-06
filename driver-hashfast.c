@@ -27,6 +27,7 @@ bool opt_hfa_dfu_boot;
 int opt_hfa_fan_default = HFA_FAN_DEFAULT;
 int opt_hfa_fan_max = HFA_FAN_MAX;
 int opt_hfa_fan_min = HFA_FAN_MIN;
+int opt_hfa_autoclock = 0;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Support for the CRC's used in header (CRC-8) and packet body (CRC-32)
@@ -1459,15 +1460,7 @@ static bool hfa_get_stats(struct cgpu_info *cgpu)
 	if (cgpu->usbinfo.nodev)
 		return false;
 
-	for (i = 0; i < info->asic_count; i++) {
-		struct hf_g1_die_data *d = &info->die_status[i];
-		
-		double die_temp = GN_DIE_TEMPERATURE(d->die.die_temperature);
-		if (die_temp > max_temp)
-			max_temp = die_temp;
-	}
-
-	cgpu->temp = max_temp;
+	cgpu->temp = info->max_temp;
 	return true;
 }
 
