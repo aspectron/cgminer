@@ -2267,7 +2267,7 @@ static void curses_print_status(void)
 	wattron(statuswin, A_BOLD);
 	cg_mvwprintw(statuswin, 0, 0, " " PACKAGE " version " VERSION " - Started: %s", datestamp);
 	wattroff(statuswin, A_BOLD);
-	mvwhline(statuswin, 1, 0, '-', 80);
+	mvwhline(statuswin, 1, 0, '-', 90);
 	cg_mvwprintw(statuswin, 2, 0, " %s", statusline);
 	wclrtoeol(statuswin);
 	cg_mvwprintw(statuswin, 3, 0, " ST: %d  SS: %d  NB: %d  LW: %d  GF: %d  RF: %d",
@@ -2288,8 +2288,8 @@ static void curses_print_status(void)
 	wclrtoeol(statuswin);
 	cg_mvwprintw(statuswin, 5, 0, " Block: %s...  Diff:%s  Started: %s  Best share: %s   ",
 		     prev_block, block_diff, blocktime, best_share);
-	mvwhline(statuswin, 6, 0, '-', 80);
-	mvwhline(statuswin, statusy - 1, 0, '-', 80);
+	mvwhline(statuswin, 6, 0, '-', 90);
+	mvwhline(statuswin, statusy - 1, 0, '-', 90);
 	cg_mvwprintw(statuswin, devcursor - 1, 1, "[P]ool management [S]ettings [D]isplay options [Q]uit");
 }
 
@@ -6211,7 +6211,8 @@ bool submit_noffset_nonce(struct thr_info *thr, struct work *work_in, uint32_t n
 	ret = true;
 	update_work_stats(thr, work);
 	if (!fulltest(work->hash, work->target)) {
-		applog(LOG_INFO, "Share above target");
+		applog(LOG_INFO, "%s %d: Share above target", thr->cgpu->drv->name,
+		       thr->cgpu->device_id);
 		goto  out;
 	}
 	submit_work_async(work);

@@ -424,6 +424,12 @@ tryagain:
 	       db->sequence_modulus);
 	info->num_sequence = db->sequence_modulus;
 
+	if (!db->hash_clockrate) {
+		applog(LOG_INFO, "%s %d: OP_USB_INIT failed! Clockrate reported as zero",
+		       hashfast->drv->name, hashfast->device_id);
+		return false;
+	}
+
 	// Now a copy of the config data used
 	if (!hfa_get_data(hashfast, (char *)&info->config_data, U32SIZE(info->config_data))) {
 		applog(LOG_WARNING, "%s %d: OP_USB_INIT failed! Failure to get config_data",
@@ -452,13 +458,18 @@ tryagain:
 	return true;
 }
 
-static void hfa_send_shutdown(struct cgpu_info *hashfast)
+static bool hfa_send_shutdown(struct cgpu_info *hashfast)
 {
+	bool ret = false;
+
 	if (hashfast->usbinfo.nodev)
-		return;
-	hfa_send_frame(hashfast, HF_USB_CMD(OP_USB_SHUTDOWN), 0, NULL, 0);
-	/* Wait to allow device to properly shut down. */
-	cgsleep_ms(1000);
+		return ret;
+	if (hfa_send_frame(hashfast, HF_USB_CMD(OP_USB_SHUTDOWN), 0, NULL, 0)) {
+		/* Wait to allow device to properly shut down. */
+		cgsleep_ms(1000);
+		ret = true;
+	}
+	return ret;
 }
 
 static void hfa_clear_readbuf(struct cgpu_info *hashfast)
@@ -633,6 +644,8 @@ out:
 	return ret;
 }
 
+static bool hfa_running_reset(struct cgpu_info *hashfast, struct hashfast_info *info);
+
 static void hfa_parse_gwq_status(struct cgpu_info *hashfast, struct hashfast_info *info,
 				 struct hf_header *h)
 {
@@ -647,8 +660,7 @@ static void hfa_parse_gwq_status(struct cgpu_info *hashfast, struct hashfast_inf
 	if (unlikely(h->core_address & 0x80)) {
 		applog(LOG_ERR, "%s %d Thermal overload tripped! Resetting device",
 		       hashfast->drv->name, hashfast->device_id);
-		hfa_send_shutdown(hashfast);
-		if (hfa_reset(hashfast, info)) {
+		if (hfa_running_reset(hashfast, info)) {
 			applog(LOG_NOTICE, "%s %d: Succesfully reset, continuing operation",
 			       hashfast->drv->name, hashfast->device_id);
 			return;
@@ -908,7 +920,11 @@ static void *hfa_read(void *arg)
 	while (likely(!hashfast->shutdown)) {
 		char buf[512];
 		struct hf_header *h = (struct hf_header *)buf;
-		bool ret = hfa_get_packet(hashfast, h);
+		bool ret;
+
+		mutex_lock(&info->rlock);
+		ret = hfa_get_packet(hashfast, h);
+		mutex_unlock(&info->rlock);
 
 		if (unlikely(hashfast->usbinfo.nodev))
 			break;
@@ -971,6 +987,7 @@ static bool hfa_prepare(struct thr_info *thr)
 	struct timeval now;
 
 	mutex_init(&info->lock);
+	mutex_init(&info->rlock);
 	if (pthread_create(&info->read_thr, NULL, hfa_read, (void *)thr))
 		quit(1, "Failed to pthread_create read thr in hfa_prepare");
 
@@ -1222,6 +1239,26 @@ dies_only:
 	}
 }
 
+static bool hfa_running_reset(struct cgpu_info *hashfast, struct hashfast_info *info)
+{
+	bool ret;
+
+	ret = hfa_send_shutdown(hashfast);
+	if (!ret)
+		goto out;
+
+	/* hfa_reset is the only other place we read from the device so we must
+	 * inhibit the read thread from reading our response to the
+	 * OP_USB_INIT */
+	mutex_lock(&info->rlock);
+	hfa_clear_readbuf(hashfast);
+	ret = hfa_reset(hashfast, info);
+	mutex_unlock(&info->rlock);
+
+out:
+	return ret;
+}
+
 static int64_t hfa_scanwork(struct thr_info *thr)
 {
 	struct cgpu_info *hashfast = thr->cgpu;
@@ -1245,7 +1282,7 @@ static int64_t hfa_scanwork(struct thr_info *thr)
 			applog(LOG_WARNING, "%s %d: Decreasing clock speed to %d with reset",
 			       hashfast->drv->name, hashfast->device_id, info->hash_clock_rate);
 		}
-		ret = hfa_reset(hashfast, info);
+		ret = hfa_running_reset(hashfast, info);
 		if (!ret) {
 			applog(LOG_ERR, "%s %d: Failed to reset after hash failure, disabling",
 			       hashfast->drv->name, hashfast->device_id);
@@ -1261,7 +1298,7 @@ restart:
 		thr->work_restart = false;
 		ret = hfa_send_frame(hashfast, HF_USB_CMD(OP_WORK_RESTART), 0, (uint8_t *)NULL, 0);
 		if (unlikely(!ret)) {
-			ret = hfa_reset(hashfast, info);
+			ret = hfa_running_reset(hashfast, info);
 			if (unlikely(!ret)) {
 				applog(LOG_ERR, "%s %d: Failed to reset after write failure, disabling",
 				       hashfast->drv->name, hashfast->device_id);
@@ -1322,7 +1359,7 @@ restart:
 			sequence = 0;
 		ret = hfa_send_frame(hashfast, OP_HASH, sequence, (uint8_t *)&op_hash_data, sizeof(op_hash_data));
 		if (unlikely(!ret)) {
-			ret = hfa_reset(hashfast, info);
+			ret = hfa_running_reset(hashfast, info);
 			if (unlikely(!ret)) {
 				applog(LOG_ERR, "%s %d: Failed to reset after write failure, disabling",
 				       hashfast->drv->name, hashfast->device_id);
