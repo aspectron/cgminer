@@ -1113,6 +1113,8 @@ static struct api_data *print_data(struct io_data *io_data, struct api_data *roo
 
 	DATASB(item)->siz = 0;
 
+	memset(buf, 0, sizeof(buf));
+
 	if (precom)
 		add_item_buf(item, COMMA);
 
