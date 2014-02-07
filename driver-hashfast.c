@@ -1494,8 +1494,6 @@ static void hfa_statline_before(char *buf, size_t bufsiz, struct cgpu_info *hash
 static bool hfa_get_stats(struct cgpu_info *cgpu)
 {
 	struct hashfast_info *info = cgpu->device_data;
-	int i;
-	double max_temp = 0.0;
 
 	// Device is gone
 	if (cgpu->usbinfo.nodev)
