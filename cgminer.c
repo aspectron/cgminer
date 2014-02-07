@@ -6034,9 +6034,11 @@ static void gen_stratum_work(struct pool *pool, struct work *work)
 struct work *get_work(struct thr_info *thr, const int thr_id)
 {
 	struct work *work = NULL;
+	time_t diff_t;
 
 	thread_reportout(thr);
 	applog(LOG_DEBUG, "Popping work from get queue to get work");
+	diff_t = time(NULL);
 	while (!work) {
 		work = hash_pop();
 		if (stale_work(work, false)) {
@@ -6044,6 +6046,14 @@ struct work *get_work(struct thr_info *thr, const int thr_id)
 			work = NULL;
 			wake_gws();
 		}
+	}
+	diff_t = time(NULL) - diff_t;
+	/* Since this is a blocking function, we need to add grace time to
+	 * the device's last valid work to not make outages appear to be
+	 * device failures. */
+	if (diff_t > 0) {
+		applog(LOG_DEBUG, "Get work blocked for %d seconds", (int)diff_t);
+		thr->cgpu->last_device_valid_work += diff_t;
 	}
 	applog(LOG_DEBUG, "Got work from get queue to get work for thread %d", thr_id);
 
@@ -8358,6 +8368,8 @@ begin_bench:
 		int ts, max_staged = opt_queue;
 		struct pool *pool, *cp;
 		bool lagging = false;
+		struct timespec then;
+		struct timeval now;
 		struct work *work;
 
 		if (opt_work_update)
@@ -8370,6 +8382,10 @@ begin_bench:
 		if (!pool_localgen(cp) && !staged_rollable)
 			max_staged += mining_threads;
 
+		cgtime(&now);
+		then.tv_sec = now.tv_sec + 2;
+		then.tv_nsec = now.tv_usec * 1000;
+
 		mutex_lock(stgd_lock);
 		ts = __total_staged();
 
@@ -8378,7 +8394,7 @@ begin_bench:
 
 		/* Wait until hash_pop tells us we need to create more work */
 		if (ts > max_staged) {
-			pthread_cond_wait(&gws_cond, stgd_lock);
+			pthread_cond_timedwait(&gws_cond, stgd_lock, &then);
 			ts = __total_staged();
 		}
 		mutex_unlock(stgd_lock);
