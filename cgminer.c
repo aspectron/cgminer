@@ -79,21 +79,21 @@ char *curly = ":D";
 #ifdef USE_HASHFAST
 #include "driver-hashfast.h"
 
-inline void hfa_set_hash_clock(int dev, int hash_clock) {
-	struct cgpu_info *cgpu = get_devices(dev);
-	opt_hfa_hash_clock = hash_clock;
-	reinit_device(cgpu); }
+inline void hfa_set_hash_clock(struct cgpu_info *cgpu, int hash_clock) {
+	if (cgpu && cgpu->drv && strncmp(cgpu->drv->name, "HF", 2) == 0) {
+		opt_hfa_hash_clock = hash_clock;
+		reinit_device(cgpu); 
+	}
+}
 
-inline int hfa_get_hash_clock(int dev) {
-	struct cgpu_info *cgpu = get_devices(dev);
-
-	if (strcmp(cgpu->drv->name, "HFA") == 0 ||
-		strcmp(cgpu->drv->name, "HFB") == 0 ||
-		strcmp(cgpu->drv->name, "HFS") == 0)
-		return ((struct hashfast_info *)cgpu->device_data)->hash_clock_rate;
+inline int hfa_get_hash_clock(struct cgpu_info *cgpu) {
+	if (cgpu && cgpu->drv && strncmp(cgpu->drv->name, "HF", 2) == 0) {
+		struct hashfast_info *info = (struct hashfast_info *)cgpu->device_data;
+		return info->hash_clock_rate + info->clock_offset;
+	}
 	else
 		return 0; 
-	}
+}
 #endif
 
 #if defined(USE_BITFORCE) || defined(USE_ICARUS) || defined(USE_AVALON) || defined(USE_MODMINER)
@@ -596,8 +596,6 @@ struct pool *add_pool(void)
 	pool = calloc(sizeof(struct pool), 1);
 	if (!pool)
 		quit(1, "Failed to malloc pool in add_pool");
-
-	memset(pool, 0, sizeof(struct pool));
 
 	pool->pool_no = pool->prio = total_pools;
 	pools = realloc(pools, sizeof(struct pool *) * (total_pools + 2));

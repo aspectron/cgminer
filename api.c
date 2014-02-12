@@ -2007,7 +2007,7 @@ static void ascstatus(struct io_data *io_data, int asc, bool isjson, bool precom
 			root = api_add_string(root, "Serial Number", cgpu->usbdev->serial_string, false);
 #endif
 #ifdef USE_HASHFAST
-		int hash_clock = hfa_get_hash_clock(dev);
+		int hash_clock = hfa_get_hash_clock(cgpu);
 		if (hash_clock)
 			root = api_add_int(root, "Hash Clock", &hash_clock, false);
 #endif		
@@ -3831,6 +3831,7 @@ static void ascset(struct io_data *io_data, __maybe_unused SOCKETTYPE c, __maybe
 #ifdef USE_HASHFAST
 static void aschfsetclock(struct io_data *io_data, __maybe_unused SOCKETTYPE c, __maybe_unused char *param, bool isjson, __maybe_unused char group) 
 {
+	struct cgpu_info *cgpu;
 	int numasc = numascs();
 
 	if (numasc == 0) {
@@ -3865,7 +3866,9 @@ static void aschfsetclock(struct io_data *io_data, __maybe_unused SOCKETTYPE c, 
 		return;
 	}
 
-	hfa_set_hash_clock(dev, hash_clock);
+	cgpu = get_devices(dev);
+
+	hfa_set_hash_clock(cgpu, hash_clock);
 	message(io_data, MSG_SETHASHCLOCK, id, opt, isjson);
 }
 #endif

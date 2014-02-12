@@ -494,6 +494,7 @@ static bool hfa_detect_common(struct cgpu_info *hashfast)
 	if (!info)
 		quit(1, "Failed to calloc hashfast_info in hfa_detect_common");
 	hashfast->device_data = info;
+
 	/* hashfast_reset should fill in details for info */
 	ret = hfa_reset(hashfast, info);
 	if (!ret) {
