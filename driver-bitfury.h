@@ -1,5 +1,5 @@
 /*
- * Copyright 2013 Con Kolivas
+ * Copyright 2013-2014 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -51,6 +51,7 @@ struct bitfury_info {
 	double saved_nonces;
 	int cycles;
 	bool valid; /* Set on first valid data being found */
+	bool failing; /* Set when an attempted restart has been sent */
 
 	/* BF1 specific data */
 	uint8_t version;
@@ -61,7 +62,6 @@ struct bitfury_info {
 	/* BXF specific data */
 	pthread_mutex_t lock;
 	pthread_t read_thr;
-	double temperature;
 	int last_decitemp;
 	int max_decitemp;
 	int temp_target;

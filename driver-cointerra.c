@@ -1,5 +1,5 @@
 /*
- * Copyright 2013 Con Kolivas <kernel@kolivas.org>
+ * Copyright 2013-2014 Con Kolivas <kernel@kolivas.org>
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -13,6 +13,8 @@
 #include "driver-cointerra.h"
 
 static const char *cointerra_hdr = "ZZ";
+
+int opt_ps_load;
 
 static void cta_gen_message(char *msg, char type)
 {
@@ -60,6 +62,7 @@ static bool cta_open(struct cgpu_info *cointerra)
 	buf[CTA_RESET_TYPE] = CTA_RESET_INIT | CTA_RESET_DIFF;
 	buf[CTA_RESET_DIFF] = diff_to_bits(CTA_INIT_DIFF);
 	buf[CTA_RESET_LOAD] = opt_cta_load ? opt_cta_load : 255;
+	buf[CTA_RESET_PSLOAD] = opt_ps_load;
 
 	if (cointerra->usbinfo.nodev)
 		return ret;
@@ -435,8 +438,12 @@ static void u16array_from_msg(uint16_t *u16, int entries, int var, char *buf)
 		u16[i] = hu16_from_msg(buf, var + j);
 }
 
-static void cta_parse_statread(struct cointerra_info *info, char *buf)
+static void cta_parse_statread(struct cgpu_info *cointerra, struct cointerra_info *info,
+			       char *buf)
 {
+	float max_temp = 0;
+	int i;
+
 	mutex_lock(&info->lock);
 	u16array_from_msg(info->coretemp, CTA_CORES, CTA_STAT_CORETEMPS, buf);
 	info->ambtemp_low = hu16_from_msg(buf, CTA_STAT_AMBTEMP_LOW);
@@ -450,6 +457,15 @@ static void cta_parse_statread(struct cointerra_info *info, char *buf)
 	info->inactive = hu16_from_msg(buf, CTA_STAT_INACTIVE);
 	info->active = hu16_from_msg(buf, CTA_STAT_ACTIVE);
 	mutex_unlock(&info->lock);
+
+	for (i = 0; i < CTA_CORES; i++) {
+		if (info->coretemp[i] > max_temp)
+			max_temp = info->coretemp[i];
+	}
+	max_temp /= 100.0;
+	/* Store the max temperature in the cgpu struct as an exponentially
+	 * changing value. */
+	cointerra->temp = cointerra->temp * 0.63 + max_temp * 0.37;
 }
 
 static void u8array_from_msg(uint8_t *u8, int entries, int var, char *buf)
@@ -534,6 +550,9 @@ static void cta_parse_debug(struct cointerra_info *info, char *buf)
 	u16array_from_msg(info->tot_hw_errors, CTA_CORES, CTA_STAT_HW_ERRORS, buf);
 	info->tot_hashes = hu64_from_msg(buf, CTA_STAT_HASHES);
 	info->tot_flushed_hashes = hu64_from_msg(buf, CTA_STAT_FLUSHED_HASHES);
+	info->autovoltage = u8_from_msg(buf, CTA_STAT_AUTOVOLTAGE);
+	info->current_ps_percent = u8_from_msg(buf, CTA_STAT_POWER_PERCENT);
+	info->power_used = hu16_from_msg(buf,CTA_STAT_POWER_USED);
 
 	mutex_unlock(&info->lock);
 }
@@ -561,7 +580,7 @@ static void cta_parse_msg(struct thr_info *thr, struct cgpu_info *cointerra,
 		case CTA_RECV_STATREAD:
 			applog(LOG_DEBUG, "%s %d: Status readings message received",
 			       cointerra->drv->name, cointerra->device_id);
-			cta_parse_statread(info, buf);
+			cta_parse_statread(cointerra, info, buf);
 			break;
 		case CTA_RECV_STATSET:
 			applog(LOG_DEBUG, "%s %d: Status settings message received",
@@ -813,6 +832,7 @@ resend:
 
 	buf[CTA_RESET_TYPE] = reset_type;
 	buf[CTA_RESET_LOAD] = opt_cta_load ? opt_cta_load : 255;
+	buf[CTA_RESET_PSLOAD] = opt_ps_load;
 
 	applog(LOG_INFO, "%s %d: Sending Reset type %u with diffbits %u", cointerra->drv->name,
 	       cointerra->device_id, reset_type, diffbits);
@@ -1067,6 +1087,9 @@ static struct api_data *cta_api_stats(struct cgpu_info *cgpu)
 	root = api_add_string(root, "Asic1Core2", bitmaphex, true);
 	__bin2hex(bitmaphex, &info->pipe_bitmap[112], 16);
 	root = api_add_string(root, "Asic1Core3", bitmaphex, true);
+	root = api_add_uint8(root,"AV",&info->autovoltage, false);
+	root = api_add_uint8(root,"Power Supply Percent",&info->current_ps_percent, false);
+	root = api_add_uint16(root,"Power Used",&info->power_used, false);
 
 	return root;
 }
@@ -1074,21 +1097,18 @@ static struct api_data *cta_api_stats(struct cgpu_info *cgpu)
 static void cta_statline_before(char *buf, size_t bufsiz, struct cgpu_info *cointerra)
 {
 	struct cointerra_info *info = cointerra->device_data;
-	double max_temp = 0, max_volt = 0;
+	double max_volt = 0;
 	int freq = 0, i;
 
 	for (i = 0; i < CTA_CORES; i++) {
-		if (info->coretemp[i] > max_temp)
-			max_temp = info->coretemp[i];
 		if (info->corevolts[i] > max_volt)
 			max_volt = info->corevolts[i];
 		if (info->corefreqs[i] > freq)
 			freq = info->corefreqs[i];
 	}
-	max_temp /= 100;
 	max_volt /= 100;
 
-	tailsprintf(buf, bufsiz, "%3d %3.1fC %2.1fV | ", freq, max_temp, max_volt);
+	tailsprintf(buf, bufsiz, "%3d %3.1fC %2.1fV | ", freq, cointerra->temp, max_volt);
 }
 
 struct device_drv cointerra_drv = {

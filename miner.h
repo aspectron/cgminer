@@ -160,6 +160,7 @@ static inline int fsync (int fd)
 #ifndef htobe32
 # if __BYTE_ORDER == __LITTLE_ENDIAN
 #  define htole16(x) (x)
+#  define le16toh(x) (x)
 #  define htole32(x) (x)
 #  define htole64(x) (x)
 #  define le32toh(x) (x)
@@ -170,6 +171,7 @@ static inline int fsync (int fd)
 #  define htobe64(x) bswap_64(x)
 # elif __BYTE_ORDER == __BIG_ENDIAN
 #  define htole16(x) bswap_16(x)
+#  define le16toh(x) bswap_16(x)
 #  define htole32(x) bswap_32(x)
 #  define le32toh(x) bswap_32(x)
 #  define le64toh(x) bswap_64(x)
@@ -423,15 +425,14 @@ struct cgpu_info {
 	void *device_data;
 #ifdef USE_USBUTILS
 	struct cg_usb_device *usbdev;
+	struct cg_usb_info usbinfo;
+	bool blacklisted;
 #endif
 #ifdef USE_AVALON
 	struct work **works;
 	int work_array;
 	int queued;
 	int results;
-#endif
-#ifdef USE_USBUTILS
-	struct cg_usb_info usbinfo;
 #endif
 #ifdef USE_MODMINER
 	char fpgaid;
@@ -472,7 +473,7 @@ struct cgpu_info {
 
 	bool new_work;
 
-	float temp;
+	double temp;
 	int cutofftemp;
 
 	int diff1;
@@ -687,7 +688,7 @@ extern void _quit(int status);
  * So, e.g. use it to track down a deadlock - after a reproducable deadlock occurs
  * ... Of course if the API code itself deadlocks, it wont help :)
  */
-#define LOCK_TRACKING 0
+#define LOCK_TRACKING 1
 
 #if LOCK_TRACKING
 enum cglock_typ {

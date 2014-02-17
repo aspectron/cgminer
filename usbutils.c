@@ -1,6 +1,6 @@
 /*
  * Copyright 2012-2013 Andrew Smith
- * Copyright 2013 Con Kolivas <kernel@kolivas.org>
+ * Copyright 2013-2014 Con Kolivas <kernel@kolivas.org>
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -636,6 +636,7 @@ struct usb_in_use_list {
 
 // List of in use devices
 static struct usb_in_use_list *in_use_head = NULL;
+static struct usb_in_use_list *blacklist_head = NULL;
 
 struct resource_work {
 	bool lock;
@@ -1229,12 +1230,13 @@ static void in_use_get_ress(uint8_t bus_number, uint8_t device_address, void **r
 				(int)bus_number, (int)device_address);
 }
 
-static bool __is_in_use(uint8_t bus_number, uint8_t device_address)
+static bool _in_use(struct usb_in_use_list *head, uint8_t bus_number,
+		    uint8_t device_address)
 {
 	struct usb_in_use_list *in_use_tmp;
 	bool ret = false;
 
-	in_use_tmp = in_use_head;
+	in_use_tmp = head;
 	while (in_use_tmp) {
 		if (in_use_tmp->in_use.bus_number == (int)bus_number &&
 		    in_use_tmp->in_use.device_address == (int)device_address) {
@@ -1242,9 +1244,19 @@ static bool __is_in_use(uint8_t bus_number, uint8_t device_address)
 			break;
 		}
 		in_use_tmp = in_use_tmp->next;
+		if (in_use_tmp == head)
+			break;
 	}
-
 	return ret;
+}
+
+static bool __is_in_use(uint8_t bus_number, uint8_t device_address)
+{
+	if (_in_use(in_use_head, bus_number, device_address))
+		return true;
+	if (_in_use(blacklist_head, bus_number, device_address))
+		return true;
+	return false;
 }
 
 static bool is_in_use_bd(uint8_t bus_number, uint8_t device_address)
@@ -1262,16 +1274,94 @@ static bool is_in_use(libusb_device *dev)
 	return is_in_use_bd(libusb_get_bus_number(dev), libusb_get_device_address(dev));
 }
 
-static void add_in_use(uint8_t bus_number, uint8_t device_address)
+static bool how_in_use(uint8_t bus_number, uint8_t device_address, bool *blacklisted)
 {
-	struct usb_in_use_list *in_use_tmp;
+	bool ret;
+	mutex_lock(&cgusb_lock);
+	ret = _in_use(in_use_head, bus_number, device_address);
+	if (!ret) {
+		if (_in_use(blacklist_head, bus_number, device_address))
+			*blacklisted = true;
+	}
+	mutex_unlock(&cgusb_lock);
+
+	return ret;
+}
+
+void usb_list(void)
+{
+	struct libusb_device_descriptor desc;
+	struct libusb_device_handle *handle;
+	uint8_t bus_number;
+	uint8_t device_address;
+	libusb_device **list;
+	ssize_t count, i, j;
+	int err, total = 0;
+
+	count = libusb_get_device_list(NULL, &list);
+	if (count < 0) {
+		applog(LOG_ERR, "USB list: failed, err:(%d) %s", (int)count, libusb_error_name((int)count));
+		return;
+	}
+	if (count == 0) {
+		applog(LOG_WARNING, "USB list: found no devices");
+		return;
+	}
+	for (i = 0; i < count; i++) {
+		bool known = false, blacklisted = false, active;
+		unsigned char manuf[256], prod[256];
+		libusb_device *dev = list[i];
+
+		err = libusb_get_device_descriptor(dev, &desc);
+		if (err) {
+			applog(LOG_WARNING, "USB list: Failed to get descriptor %d", (int)i);
+			break;
+		}
+
+		bus_number = libusb_get_bus_number(dev);
+		device_address = libusb_get_device_address(dev);
+
+		for (j = 0; find_dev[j].drv != DRIVER_MAX; j++) {
+			if ((find_dev[j].idVendor == desc.idVendor) &&
+			    (find_dev[j].idProduct == desc.idProduct)) {
+				known = true;
+				break;
+			}
+		}
+		if (!known)
+			continue;
+
+		err = libusb_open(dev, &handle);
+		if (err) {
+			applog(LOG_WARNING, "USB list: Failed to open %d", (int)i);
+			break;
+		}
+		libusb_get_string_descriptor_ascii(handle, desc.iManufacturer, manuf, 255);
+		libusb_get_string_descriptor_ascii(handle, desc.iProduct, prod, 255);
+		total++;
+		active = how_in_use(bus_number, device_address, &blacklisted);
+		simplelog(LOG_WARNING, "Bus %u Device %u ID: %04x:%04x %s %s %sactive %s",
+		       bus_number, device_address, desc.idVendor, desc.idProduct,
+		       manuf, prod, active ? "" : "in", blacklisted ? "blacklisted" : "");
+	}
+	libusb_free_device_list(list, 1);
+	simplelog(LOG_WARNING, "%d total known USB device%s", total, total > 1 ? "s": "");
+}
+
+static void add_in_use(uint8_t bus_number, uint8_t device_address, bool blacklist)
+{
+	struct usb_in_use_list *in_use_tmp, **head;
 	bool found = false;
 
 	mutex_lock(&cgusb_lock);
-	if (unlikely(__is_in_use(bus_number, device_address))) {
+	if (unlikely(!blacklist && __is_in_use(bus_number, device_address))) {
 		found = true;
 		goto nofway;
 	}
+	if (blacklist)
+		head = &blacklist_head;
+	else
+		head = &in_use_head;
 
 	in_use_tmp = calloc(1, sizeof(*in_use_tmp));
 	if (unlikely(!in_use_tmp))
@@ -1279,9 +1369,9 @@ static void add_in_use(uint8_t bus_number, uint8_t device_address)
 	in_use_tmp->in_use.bus_number = (int)bus_number;
 	in_use_tmp->in_use.device_address = (int)device_address;
 	in_use_tmp->next = in_use_head;
-	if (in_use_head)
-		in_use_head->prev = in_use_tmp;
-	in_use_head = in_use_tmp;
+	if (*head)
+		(*head)->prev = in_use_tmp;
+	*head = in_use_tmp;
 nofway:
 	mutex_unlock(&cgusb_lock);
 
@@ -1290,22 +1380,26 @@ nofway:
 				(int)bus_number, (int)device_address);
 }
 
-static void remove_in_use(uint8_t bus_number, uint8_t device_address)
+static void __remove_in_use(uint8_t bus_number, uint8_t device_address, bool blacklist)
 {
-	struct usb_in_use_list *in_use_tmp;
+	struct usb_in_use_list *in_use_tmp, **head;
 	bool found = false;
 
 	mutex_lock(&cgusb_lock);
+	if (blacklist)
+		head = &blacklist_head;
+	else
+		head = &in_use_head;
 
-	in_use_tmp = in_use_head;
+	in_use_tmp = *head;
 	while (in_use_tmp) {
 		if (in_use_tmp->in_use.bus_number == (int)bus_number &&
 		    in_use_tmp->in_use.device_address == (int)device_address) {
 			found = true;
-			if (in_use_tmp == in_use_head) {
-				in_use_head = in_use_head->next;
-				if (in_use_head)
-					in_use_head->prev = NULL;
+			if (in_use_tmp == *head) {
+				*head = (*head)->next;
+				if (*head)
+					(*head)->prev = NULL;
 			} else {
 				in_use_tmp->prev->next = in_use_tmp->next;
 				if (in_use_tmp->next)
@@ -1315,13 +1409,21 @@ static void remove_in_use(uint8_t bus_number, uint8_t device_address)
 			break;
 		}
 		in_use_tmp = in_use_tmp->next;
+		if (in_use_tmp == *head)
+			break;
 	}
 
 	mutex_unlock(&cgusb_lock);
 
-	if (!found)
+	if (!found) {
 		applog(LOG_ERR, "FAIL: USB remove not already in use (%d:%d)",
 				(int)bus_number, (int)device_address);
+	}
+}
+
+static void remove_in_use(uint8_t bus_number, uint8_t device_address)
+{
+	__remove_in_use(bus_number, device_address, false);
 }
 
 static bool cgminer_usb_lock_bd(struct device_drv *drv, uint8_t bus_number, uint8_t device_address)
@@ -1478,7 +1580,7 @@ void usb_uninit(struct cgpu_info *cgpu)
 /* We have dropped the read devlock before entering this function but we pick
  * up the write lock to prevent any attempts to work on dereferenced code once
  * the nodev flag has been set. */
-static void release_cgpu(struct cgpu_info *cgpu)
+static bool __release_cgpu(struct cgpu_info *cgpu)
 {
 	struct cg_usb_device *cgusb = cgpu->usbdev;
 	bool initted = cgpu->usbinfo.initialised;
@@ -1487,7 +1589,7 @@ static void release_cgpu(struct cgpu_info *cgpu)
 
 	// It has already been done
 	if (cgpu->usbinfo.nodev)
-		return;
+		return false;
 
 	applog(LOG_DEBUG, "USB release %s%i",
 			cgpu->drv->name, cgpu->device_id);
@@ -1520,7 +1622,35 @@ static void release_cgpu(struct cgpu_info *cgpu)
 	}
 
 	_usb_uninit(cgpu);
-	cgminer_usb_unlock_bd(cgpu->drv, cgpu->usbinfo.bus_number, cgpu->usbinfo.device_address);
+	return true;
+}
+
+static void release_cgpu(struct cgpu_info *cgpu)
+{
+	if (__release_cgpu(cgpu))
+		cgminer_usb_unlock_bd(cgpu->drv, cgpu->usbinfo.bus_number, cgpu->usbinfo.device_address);
+}
+
+void blacklist_cgpu(struct cgpu_info *cgpu)
+{
+	if (cgpu->blacklisted) {
+		applog(LOG_WARNING, "Device already blacklisted");
+		return;
+	}
+	cgpu->blacklisted = true;
+	add_in_use(cgpu->usbinfo.bus_number, cgpu->usbinfo.device_address, true);
+	if (__release_cgpu(cgpu))
+		cgminer_usb_unlock_bd(cgpu->drv, cgpu->usbinfo.bus_number, cgpu->usbinfo.device_address);
+}
+
+void whitelist_cgpu(struct cgpu_info *cgpu)
+{
+	if (!cgpu->blacklisted) {
+		applog(LOG_WARNING, "Device not blacklisted");
+		return;
+	}
+	__remove_in_use(cgpu->usbinfo.bus_number, cgpu->usbinfo.device_address, true);
+	cgpu->blacklisted = false;
 }
 
 /*
@@ -2623,6 +2753,24 @@ err_retry:
 	return err;
 }
 
+void usb_reset(struct cgpu_info *cgpu)
+{
+	int pstate, err = 0;
+
+	DEVRLOCK(cgpu, pstate);
+	if (!cgpu->usbinfo.nodev) {
+		err = libusb_reset_device(cgpu->usbdev->handle);
+		applog(LOG_WARNING, "%s %i attempted reset got err:(%d) %s",
+			cgpu->drv->name, cgpu->device_id, err, libusb_error_name(err));
+	}
+	if (NODEV(err)) {
+		cg_ruwlock(&cgpu->usbinfo.devlock);
+		release_cgpu(cgpu);
+		DEVWUNLOCK(cgpu, pstate);
+	} else
+		DEVRUNLOCK(cgpu, pstate);
+}
+
 int _usb_read(struct cgpu_info *cgpu, int intinfo, int epinfo, char *buf, size_t bufsiz,
 	      int *processed, int timeout, const char *end, enum usb_cmds cmd, bool readonce, bool cancellable)
 {
@@ -3508,7 +3656,7 @@ static bool resource_lock(const char *dname, uint8_t bus_number, uint8_t device_
 			goto fail;
 	}
 
-	add_in_use(bus_number, device_address);
+	add_in_use(bus_number, device_address, false);
 	in_use_store_ress(bus_number, device_address, (void *)usbMutex, (void *)sec);
 
 	return true;
@@ -3604,7 +3752,7 @@ fail:
 		goto free_out;
 	}
 
-	add_in_use(bus_number, device_address);
+	add_in_use(bus_number, device_address, false);
 	in_use_store_ress(bus_number, device_address, (void *)key, (void *)sem);
 	return true;
 

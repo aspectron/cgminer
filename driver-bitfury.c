@@ -1,5 +1,5 @@
 /*
- * Copyright 2013 Con Kolivas
+ * Copyright 2013-2014 Con Kolivas
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
@@ -562,7 +562,7 @@ static void parse_bxf_temp(struct cgpu_info *bitfury, struct bitfury_info *info,
 	}
 
 	mutex_lock(&info->lock);
-	info->temperature = (double)decitemp / 10;
+	bitfury->temp = (double)decitemp / 10;
 	if (decitemp > info->max_decitemp) {
 		info->max_decitemp = decitemp;
 		applog(LOG_DEBUG, "%s %d: New max decitemp %d", bitfury->drv->name,
@@ -941,17 +941,43 @@ static int64_t bitfury_scanwork(struct thr_info *thr)
 {
 	struct cgpu_info *bitfury = thr->cgpu;
 	struct bitfury_info *info = bitfury->device_data;
+	int64_t ret = -1;
+
+	if (unlikely(last_getwork - bitfury->last_device_valid_work > 60)) {
+		if (info->failing) {
+			if (last_getwork - bitfury->last_device_valid_work > 120) {
+				applog(LOG_ERR, "%s %d: Device failed to respond to restart",
+				       bitfury->drv->name, bitfury->device_id);
+				return ret;
+			}
+		} else {
+			applog(LOG_WARNING, "%s %d: No valid hashes for over 1 minute, attempting to reset",
+			       bitfury->drv->name, bitfury->device_id);
+			usb_reset(bitfury);
+			info->failing = true;
+		}
+	}
+
+	if (unlikely(bitfury->usbinfo.nodev))
+		return ret;
 
 	switch(info->ident) {
 		case IDENT_BF1:
-			return bf1_scan(thr, bitfury, info);
+			ret = bf1_scan(thr, bitfury, info);
+			break;
 		case IDENT_BXF:
-			return bxf_scan(bitfury, info);
+			ret = bxf_scan(bitfury, info);
+			break;
 		case IDENT_NF1:
-			return nf1_scan(thr, bitfury, info);
+			ret = nf1_scan(thr, bitfury, info);
+			break;
 		default:
-			return 0;
+			ret = 0;
+			break;
 	}
+	if (ret > 0)
+		info->failing = false;
+	return ret;
 }
 
 static void bxf_send_maxroll(struct cgpu_info *bitfury, int maxroll)
@@ -1039,7 +1065,7 @@ static struct api_data *bf1_api_stats(struct bitfury_info *info)
 	return root;
 }
 
-static struct api_data *bxf_api_stats(struct bitfury_info *info)
+static struct api_data *bxf_api_stats(struct cgpu_info *bitfury, struct bitfury_info *info)
 {
 	struct api_data *root = NULL;
 	double nonce_rate;
@@ -1052,7 +1078,7 @@ static struct api_data *bxf_api_stats(struct bitfury_info *info)
 	nonce_rate = (double)info->total_nonces / (double)info->cycles;
 	root = api_add_double(root, "NonceRate", &nonce_rate, true);
 	root = api_add_int(root, "NoMatchingWork", &info->no_matching_work, false);
-	root = api_add_double(root, "Temperature", &info->temperature, false);
+	root = api_add_double(root, "Temperature", &bitfury->temp, false);
 	root = api_add_int(root, "Max DeciTemp", &info->max_decitemp, false);
 	root = api_add_uint8(root, "Clock", &info->clocks, false);
 	root = api_add_int(root, "Core0 hwerror", &info->filtered_hw[0], false);
@@ -1074,7 +1100,7 @@ static struct api_data *bitfury_api_stats(struct cgpu_info *cgpu)
 			return bf1_api_stats(info);
 			break;
 		case IDENT_BXF:
-			return bxf_api_stats(info);
+			return bxf_api_stats(cgpu, info);
 			break;
 		default:
 			break;
@@ -1088,7 +1114,7 @@ static void bitfury_get_statline_before(char *buf, size_t bufsiz, struct cgpu_in
 
 	switch(info->ident) {
 		case IDENT_BXF:
-			tailsprintf(buf, bufsiz, "%5.1fC         | ", info->temperature);
+			tailsprintf(buf, bufsiz, "%5.1fC         | ", cgpu->temp);
 			break;
 		case IDENT_BF1:
 		default:
