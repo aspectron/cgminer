@@ -1184,7 +1184,7 @@ static struct api_data *print_data(struct io_data *io_data, struct api_data *roo
 				snprintf(buf, sizeof(buf), "%"PRIu32, *((uint32_t *)(root->data)));
 				break;
 			case API_HEX32:
-				snprintf(buf, sizeof(buf), "0x%08x", *((uint32_t *)(root->data)));
+				snprintf(buf, sizeof(buf), "\"0x%08x\"", *((uint32_t *)(root->data)));
 				break;
 			case API_UINT64:
 				snprintf(buf, sizeof(buf), "%"PRIu64, *((uint64_t *)(root->data)));
@@ -2004,16 +2004,19 @@ static void ascstatus(struct io_data *io_data, int asc, bool isjson, bool precom
 		root = api_add_diff(root, "Difficulty Accepted", &(cgpu->diff_accepted), false);
 		root = api_add_diff(root, "Difficulty Rejected", &(cgpu->diff_rejected), false);
 		root = api_add_diff(root, "Last Share Difficulty", &(cgpu->last_share_diff), false);
+
 #ifdef USE_USBUTILS
 		root = api_add_bool(root, "No Device", &(cgpu->usbinfo.nodev), false);
 		if (cgpu && cgpu->usbdev && cgpu->usbdev->serial_string)
 			root = api_add_string(root, "Serial Number", cgpu->usbdev->serial_string, false);
 #endif
+/*
 #ifdef USE_HASHFAST
 		int hash_clock = hfa_get_hash_clock(cgpu);
 		if (hash_clock)
 			root = api_add_int(root, "Hash Clock", &hash_clock, false);
-#endif		
+#endif
+*/	
 		root = api_add_time(root, "Last Valid Work", &(cgpu->last_device_valid_work), false);
 		double hwp = (cgpu->hw_errors + cgpu->diff1) ?
 				(double)(cgpu->hw_errors) / (double)(cgpu->hw_errors + cgpu->diff1) : 0;
@@ -2022,6 +2025,14 @@ static void ascstatus(struct io_data *io_data, int asc, bool isjson, bool precom
 				(double)(cgpu->diff_rejected) / (double)(cgpu->diff1) : 0;
 		root = api_add_percent(root, "Device Rejected%", &rejp, false);
 		root = api_add_elapsed(root, "Device Elapsed", &(dev_runtime), false);
+
+// Lifted from minerstatus so we avoid calling it
+// and putting extra load on cgminer
+
+		if (cgpu->drv && cgpu->drv->get_api_stats) {
+				struct api_data *extra = cgpu->drv->get_api_stats(cgpu);
+				root = api_add_extra(root, extra);
+		}
 
 		root = print_data(io_data, root, isjson, precom);
 	}
