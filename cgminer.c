@@ -207,6 +207,7 @@ char *opt_icarus_timing = NULL;
 int opt_anu_freq = 200;
 #endif
 bool opt_worktime;
+bool opt_drdd;
 #ifdef USE_AVALON
 char *opt_avalon_options = NULL;
 char *opt_bitburner_fury_options = NULL;
@@ -1481,6 +1482,9 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITHOUT_ARG("--worktime",
 			opt_set_bool, &opt_worktime,
 			"Display extra work time debug information"),
+	OPT_WITHOUT_ARG("--dont-report-disabled-devices",
+			opt_set_bool, &opt_drdd,
+			opt_hidden),
 	OPT_ENDTABLE
 };
 

@@ -969,6 +969,7 @@ extern char *opt_icarus_timing;
 extern int opt_anu_freq;
 #endif
 extern bool opt_worktime;
+extern bool opt_drdd;
 #ifdef USE_AVALON
 extern char *opt_avalon_options;
 extern char *opt_bitburner_fury_options;

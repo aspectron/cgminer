@@ -1953,7 +1953,7 @@ static const char *status2str(enum alive status)
 }
 
 #ifdef HAVE_AN_ASIC
-static void ascstatus(struct io_data *io_data, int asc, bool isjson, bool precom)
+static bool ascstatus(struct io_data *io_data, int asc, bool isjson, bool precom)
 {
 	struct api_data *root = NULL;
 	char *enabled;
@@ -1963,7 +1963,7 @@ static void ascstatus(struct io_data *io_data, int asc, bool isjson, bool precom
 	if (numasc > 0 && asc >= 0 && asc < numasc) {
 		int dev = ascdevice(asc);
 		if (dev < 0) // Should never happen
-			return;
+			return false;
 
 		struct cgpu_info *cgpu = get_devices(dev);
 		float temp = cgpu->temp;
@@ -1975,8 +1975,12 @@ static void ascstatus(struct io_data *io_data, int asc, bool isjson, bool precom
 
 		if (cgpu->deven != DEV_DISABLED)
 			enabled = (char *)YES;
-		else
-			enabled = (char *)NO;
+		else {
+			if (!opt_drdd)
+				enabled = (char *)NO;
+			else
+				return false;
+		}
 
 		status = (char *)status2str(cgpu->status);
 
@@ -2036,6 +2040,8 @@ static void ascstatus(struct io_data *io_data, int asc, bool isjson, bool precom
 
 		root = print_data(io_data, root, isjson, precom);
 	}
+
+	return true;
 }
 #endif
 
@@ -2153,9 +2159,8 @@ static void devstatus(struct io_data *io_data, __maybe_unused SOCKETTYPE c, __ma
 #ifdef HAVE_AN_ASIC
 	if (numasc > 0) {
 		for (i = 0; i < numasc; i++) {
-			ascstatus(io_data, i, isjson, isjson && devcount > 0);
-
-			devcount++;
+			if (ascstatus(io_data, i, isjson, isjson && devcount > 0))
+				devcount++;
 		}
 	}
 #endif
@@ -2449,6 +2454,8 @@ static void poolstatus(struct io_data *io_data, __maybe_unused SOCKETTYPE c, __m
 		double stalep = (pool->diff_accepted + pool->diff_rejected + pool->diff_stale) ?
 				(double)(pool->diff_stale) / (double)(pool->diff_accepted + pool->diff_rejected + pool->diff_stale) : 0;
 		root = api_add_percent(root, "Pool Stale%", &stalep, false);
+		root = api_add_diff(root, "Work Diff", &(pool->cgminer_pool_stats.last_diff), false);
+
 		if (pool->cuuid)
 			root = api_add_string(root, "CUUID", pool->cuuid, false);
 

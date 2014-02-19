@@ -1501,7 +1501,6 @@ static bool hfa_get_stats(struct cgpu_info *cgpu)
 	if (cgpu->usbinfo.nodev)
 		return false;
 
-	cgpu->temp = info->max_temp;
 	return true;
 }
 
