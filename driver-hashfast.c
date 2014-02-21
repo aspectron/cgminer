@@ -454,7 +454,26 @@ tryagain:
 		       hashfast->drv->name, hashfast->device_id);
 		return false;
 	}
+	info->base_clock = db->hash_clockrate;
 
+	return true;
+}
+
+static bool hfa_clear_readbuf(struct cgpu_info *hashfast)
+{
+	int amount, ret = 0;
+	char buf[512];
+
+	do {
+		if (hashfast->usbinfo.nodev) {
+			ret = LIBUSB_ERROR_NO_DEVICE;
+			break;
+		}
+		ret = usb_read(hashfast, buf, 512, &amount, C_HF_CLEAR_READ);
+	} while (!ret || amount);
+
+	if (ret && ret != LIBUSB_ERROR_TIMEOUT)
+		return false;
 	return true;
 }
 
@@ -464,24 +483,18 @@ static bool hfa_send_shutdown(struct cgpu_info *hashfast)
 
 	if (hashfast->usbinfo.nodev)
 		return ret;
+	/* Send a restart before the shutdown frame to tell the device to
+	 * discard any work it thinks is in flight for a cleaner restart. */
+	if (!hfa_send_frame(hashfast, HF_USB_CMD(OP_WORK_RESTART), 0, (uint8_t *)NULL, 0))
+		return ret;
+	if (!hfa_clear_readbuf(hashfast))
+		return ret;
 	if (hfa_send_frame(hashfast, HF_USB_CMD(OP_USB_SHUTDOWN), 0, NULL, 0)) {
 		/* Wait to allow device to properly shut down. */
 		cgsleep_ms(1000);
 		ret = true;
 	}
 	return ret;
-}
-
-static void hfa_clear_readbuf(struct cgpu_info *hashfast)
-{
-	int amount, ret;
-	char buf[512];
-
-	do {
-		if (hashfast->usbinfo.nodev)
-			break;
-		ret = usb_read(hashfast, buf, 512, &amount, C_HF_CLEAR_READ);
-	} while (!ret || amount);
 }
 
 static bool hfa_detect_common(struct cgpu_info *hashfast)
@@ -517,7 +530,7 @@ static bool hfa_detect_common(struct cgpu_info *hashfast)
 	if (unlikely(!(info->die_data)))
 		quit(1, "Failed to calloc die_data");
 	for (i = 0; i < info->asic_count; i++)
-		info->die_data[i].hash_clock = info->hash_clock_rate;
+		info->die_data[i].hash_clock = info->base_clock;
 
 	// The per-die statistics array
 	info->die_statistics = calloc(info->asic_count, sizeof(struct hf_long_statistics));
@@ -538,7 +551,8 @@ static bool hfa_initialise(struct cgpu_info *hashfast)
 	if (hashfast->usbinfo.nodev)
 		return false;
 
-	hfa_clear_readbuf(hashfast);
+	if (!hfa_clear_readbuf(hashfast))
+		return false;
 
 	err = usb_transfer(hashfast, 0, 9, 1, 0, C_ATMEL_RESET);
 	if (!err)
@@ -720,7 +734,7 @@ static void hfa_update_die_status(struct cgpu_info *hashfast, struct hashfast_in
 	int num_included = (h->data_length * 4) / sizeof(struct hf_g1_die_data);
 	int i, j, die = h->chip_address;
 
-	float die_temperature;
+	float die_temperature, board_temp;
 	float core_voltage[6];
 
 	// Copy in the data. They're numbered sequentially from the starting point
@@ -734,27 +748,37 @@ static void hfa_update_die_status(struct cgpu_info *hashfast, struct hashfast_in
 		/* Sanity checking */
 		if (unlikely(die_temperature > 255))
 			die_temperature = info->die_data[die].temp;
-		info->die_data[die].temp = die_temperature;
+		else
+			info->die_data[die].temp = die_temperature;
+		board_temp = board_temperature(d->temperature);
+		if (unlikely(board_temp > 255))
+			board_temp = info->die_data[die].board_temp;
+		else
+			info->die_data[die].board_temp = board_temp;
 		for (j = 0; j < 6; j++)
 			core_voltage[j] = GN_CORE_VOLTAGE(d->die.core_voltage[j]);
 
 		applog(LOG_DEBUG, "%s %d: die %2d: OP_DIE_STATUS Temps die %.1fC board %.1fC vdd's %.2f %.2f %.2f %.2f %.2f %.2f",
-			hashfast->drv->name, hashfast->device_id, die, die_temperature, board_temperature(d->temperature),
+			hashfast->drv->name, hashfast->device_id, die, die_temperature, board_temp,
 			core_voltage[0], core_voltage[1], core_voltage[2],
 			core_voltage[3], core_voltage[4], core_voltage[5]);
 		// XXX Convert board phase currents, voltage, temperature
 	}
 	if (die == info->asic_count - 1) {
-		info->temp_updates++;
 		/* We have a full set of die temperatures, find the highest
-		 * current die temp. */
-		die_temperature = 0;
+		 * current temperature. */
+		float max_temp = 0;
+
+		info->temp_updates++;
+
 		for (die = 0; die < info->asic_count; die++) {
-			if (info->die_data[die].temp > die_temperature)
-				die_temperature = info->die_data[die].temp;
+			if (info->die_data[die].temp > max_temp)
+				max_temp = info->die_data[die].temp;
+			if (info->die_data[die].board_temp > max_temp)
+				max_temp = info->die_data[die].board_temp;
 		}
 		/* Exponentially change the max_temp to smooth out troughs. */
-		hashfast->temp = hashfast->temp * 0.63 + die_temperature * 0.37;
+		hashfast->temp = hashfast->temp * 0.63 + max_temp * 0.37;
 	}
 
 	if (unlikely(hashfast->temp >= opt_hfa_overheat)) {
@@ -1247,6 +1271,7 @@ dies_only:
 static bool hfa_running_reset(struct cgpu_info *hashfast, struct hashfast_info *info)
 {
 	bool ret;
+	int i;
 
 	ret = hfa_send_shutdown(hashfast);
 	if (!ret)
@@ -1256,8 +1281,11 @@ static bool hfa_running_reset(struct cgpu_info *hashfast, struct hashfast_info *
 	 * inhibit the read thread from reading our response to the
 	 * OP_USB_INIT */
 	mutex_lock(&info->rlock);
-	hfa_clear_readbuf(hashfast);
-	ret = hfa_reset(hashfast, info);
+	ret = hfa_clear_readbuf(hashfast);
+	if (ret)
+		ret = hfa_reset(hashfast, info);
+	for (i = 0; i < info->asic_count; i++)
+		info->die_data[i].hash_clock = info->base_clock;
 	mutex_unlock(&info->rlock);
 
 out:
@@ -1277,8 +1305,8 @@ static int64_t hfa_scanwork(struct thr_info *thr)
 		return -1;
 	}
 
-	if (unlikely(last_getwork - hashfast->last_device_valid_work > 60)) {
-		applog(LOG_WARNING, "%s %d: No valid hashes for over 1 minute, attempting to reset",
+	if (unlikely(last_getwork - hashfast->last_device_valid_work > 15)) {
+		applog(LOG_WARNING, "%s %d: No valid hashes for over 15 seconds, attempting to reset",
 		       hashfast->drv->name, hashfast->device_id);
 		if (info->hash_clock_rate > HFA_CLOCK_DEFAULT) {
 			info->hash_clock_rate -= 10;
@@ -1489,8 +1517,8 @@ static void hfa_statline_before(char *buf, size_t bufsiz, struct cgpu_info *hash
 		}
 	}
 
-	tailsprintf(buf, bufsiz, "%3.0fC %3d%% %3.2fV", hashfast->temp, info->fanspeed,
-		    max_volt);
+	tailsprintf(buf, bufsiz, "%3dMHz %3.0fC %3d%% %3.2fV", info->base_clock,
+		    hashfast->temp, info->fanspeed, max_volt);
 }
 
 static bool hfa_get_stats(struct cgpu_info *cgpu)

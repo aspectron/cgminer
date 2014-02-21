@@ -68,6 +68,10 @@ char *curly = ":D";
 #include "driver-avalon.h"
 #endif
 
+#ifdef USE_AVALON2
+#include "driver-avalon2.h"
+#endif
+
 #ifdef USE_BFLSC
 #include "driver-bflsc.h"
 #endif
@@ -100,7 +104,7 @@ inline int hfa_get_hash_clock(struct cgpu_info *cgpu) {
 }
 #endif
 
-#if defined(USE_BITFORCE) || defined(USE_ICARUS) || defined(USE_AVALON) || defined(USE_MODMINER)
+#if defined(USE_BITFORCE) || defined(USE_ICARUS) || defined(USE_AVALON) || defined(USE_AVALON2) || defined(USE_MODMINER)
 #	define USE_FPGA
 #endif
 
@@ -204,7 +208,7 @@ static bool no_work;
 #ifdef USE_ICARUS
 char *opt_icarus_options = NULL;
 char *opt_icarus_timing = NULL;
-int opt_anu_freq = 200;
+float opt_anu_freq = 200;
 #endif
 bool opt_worktime;
 bool opt_drdd;
@@ -219,6 +223,9 @@ char *opt_klondike_options = NULL;
 char *opt_drillbit_options = NULL;
 #endif
 char *opt_bab_options = NULL;
+#ifdef USE_BITMINE_A1
+char *opt_bitmine_a1_options = NULL;
+#endif
 #ifdef USE_USBUTILS
 char *opt_usb_select = NULL;
 int opt_usbdump = -1;
@@ -1089,17 +1096,16 @@ static char *set_icarus_timing(const char *arg)
 	return NULL;
 }
 
-static char *set_int_150_to_500(const char *arg, int *i)
+static char *set_float_125_to_500(const char *arg, float *i)
 {
-	char *err = set_int_range(arg, i, 150, 500);
-	int mult;
+	char *err = opt_set_floatval(arg, i);
 
 	if (err)
 		return err;
-	mult = *i / 25;
-	mult *= 25;
-	if (mult != *i)
-		return "Frequency must be a multiple of 25";
+
+	if (*i < 125 || *i > 500)
+		return "Value out of range";
+
 	return NULL;
 }
 #endif
@@ -1146,7 +1152,14 @@ static char *set_bab_options(const char *arg)
 	return NULL;
 }
 #endif
+#ifdef USE_BITMINE_A1
+static char *set_bitmine_a1_options(const char *arg)
+{
+	opt_set_charp(arg, &opt_bitmine_a1_options);
 
+	return NULL;
+}
+#endif
 #ifdef USE_USBUTILS
 static char *set_usb_select(const char *arg)
 {
@@ -1165,8 +1178,8 @@ static char *set_null(const char __maybe_unused *arg)
 static struct opt_table opt_config_table[] = {
 #ifdef USE_ICARUS
 	OPT_WITH_ARG("--anu-freq",
-		     set_int_150_to_500, &opt_show_intval, &opt_anu_freq,
-		     "Set AntminerU1 frequency in MHz, range 150-500"),
+		     set_float_125_to_500, &opt_show_intval, &opt_anu_freq,
+		     "Set AntminerU1 frequency in MHz, range 125-500"),
 #endif
 	OPT_WITH_ARG("--api-allow",
 		     set_api_allow, NULL, NULL,
@@ -1259,6 +1272,11 @@ static struct opt_table opt_config_table[] = {
 		     set_bitburner_fury_options, NULL, NULL,
 		     "Override avalon-options for BitBurner Fury boards baud:miners:asic:timeout:freq"),
 #endif
+#ifdef USE_BITMINE_A1
+	OPT_WITH_ARG("--bitmine-a1-options",
+		     set_bitmine_a1_options, NULL, NULL,
+		     "Bitmine A1 options ref_clk_khz:sys_clk_khz:spi_clk_khz:override_chip_num"),
+#endif
 #ifdef USE_BITFURY
 	OPT_WITH_ARG("--bxf-temp-target",
 		     set_int_0_to_200, opt_show_intval, &opt_bxf_temp_target,
@@ -1343,6 +1361,17 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITH_ARG("--kernel-path|-K",
 		     opt_set_charp, opt_show_charp, &opt_kernel_path,
 	             "Specify a path to where bitstream files are"),
+#endif
+#ifdef USE_AVALON2
+	OPT_WITH_ARG("--avalon2-freq",
+		     set_avalon2_freq, NULL, NULL,
+		     "Set frequency range for Avalon2, single value or range"),
+	OPT_WITH_ARG("--avalon2-fan",
+		     set_avalon2_fan, NULL, NULL,
+		     "Set Avalon2 target fan speed"),
+	OPT_WITH_ARG("--avalon2-voltage",
+		     set_avalon2_voltage, NULL, NULL,
+		     "Set Avalon2 core voltage, in millivolts"),
 #endif
 #ifdef USE_KLONDIKE
 	OPT_WITH_ARG("--klondike-options",
@@ -1632,6 +1661,9 @@ static char *opt_verusage_and_exit(const char *extra)
 #ifdef USE_AVALON
 		"avalon "
 #endif
+#ifdef USE_AVALON2
+		"avalon2 "
+#endif
 #ifdef USE_BFLSC
 		"bflsc "
 #endif
@@ -1667,6 +1699,9 @@ static char *opt_verusage_and_exit(const char *extra)
 #endif
 #ifdef USE_MODMINER
 		"modminer "
+#endif
+#ifdef USE_BITMINE_A1
+		"Bitmine.A1 "
 #endif
 		"mining support.\n"
 		, packagename);
@@ -4695,6 +4730,10 @@ void write_config(FILE *fcfg)
 #endif
 	if (opt_bab_options)
 		fprintf(fcfg, ",\n\"bab-options\" : \"%s\"", json_escape(opt_bab_options));
+#ifdef USE_BITMINE_A1
+	if (opt_bitmine_a1_options)
+		fprintf(fcfg, ",\n\"bitmine-a1-options\" : \"%s\"", json_escape(opt_bitmine_a1_options));
+#endif
 #ifdef USE_USBUTILS
 	if (opt_usb_select)
 		fprintf(fcfg, ",\n\"usb\" : \"%s\"", json_escape(opt_usb_select));
@@ -6376,6 +6415,24 @@ void set_target(unsigned char *dest_target, double diff)
 	memcpy(dest_target, target, 32);
 }
 
+#ifdef USE_AVALON2
+void submit_nonce2_nonce(struct thr_info *thr, uint32_t pool_no, uint32_t nonce2, uint32_t nonce)
+{
+	struct cgpu_info *cgpu = thr->cgpu;
+	struct device_drv *drv = cgpu->drv;
+
+	struct pool *pool = pools[pool_no];
+	struct work *work = make_work();
+
+	pool->nonce2 = nonce2;
+	gen_stratum_work(pool, work);
+
+	work->device_diff = MIN(drv->working_diff, work->work_difficulty);
+	submit_nonce(thr, work, nonce);
+	free_work(work);
+}
+#endif
+
 /* Generates stratum based work based on the most recent notify information
  * from the pool. This will keep generating work while a pool is down so we use
  * other means to detect when the pool has died in stratum_thread */
@@ -7107,13 +7164,17 @@ void hash_driver_work(struct thr_info *mythr)
 		struct timeval diff;
 		int64_t hashes;
 
+#ifndef USE_AVALON2
 		mythr->work_update = false;
+#endif
 
 		hashes = drv->scanwork(mythr);
 
+#ifndef USE_AVALON2
 		/* Reset the bool here in case the driver looks for it
 		 * synchronously in the scanwork loop. */
 		mythr->work_restart = false;
+#endif
 
 		if (unlikely(hashes == -1 )) {
 			applog(LOG_ERR, "%s %d failure, disabling!", drv->name, cgpu->device_id);
@@ -7538,7 +7599,7 @@ static void *watchpool_thread(void __maybe_unused *userdata)
 		}
 
 		cgsleep_ms(30000);
-			
+
 	}
 	return NULL;
 }
@@ -8760,8 +8821,8 @@ int main(int argc, char *argv[])
 			}
 #ifdef HAVE_CURSES
 			if (use_curses) {
-				halfdelay(600);
-				applog(LOG_ERR, "Press any key to exit, or cgminer will try again in 60s.");
+				halfdelay(255);
+				applog(LOG_ERR, "Press any key to exit, or cgminer will try again in 30s.");
 				if (getch() != ERR)
 					quit(0, "No servers could be used! Exiting.");
 				cbreak();
@@ -8778,7 +8839,7 @@ begin_bench:
 
 		cgpu->rolling = cgpu->total_mhashes = 0;
 	}
-	
+
 	cgtime(&total_tv_start);
 	cgtime(&total_tv_end);
 	get_datestamp(datestamp, sizeof(datestamp), &total_tv_start);

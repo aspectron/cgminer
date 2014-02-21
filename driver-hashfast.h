@@ -38,7 +38,7 @@ char *set_hfa_fan(char *arg);
 #define HFA_TEMP_HYSTERESIS 3
 #define HFA_FAN_DEFAULT 33
 #define HFA_FAN_MAX 85
-#define HFA_FAN_MIN 10
+#define HFA_FAN_MIN 5
 
 // Matching fields for hf_statistics, but large #s for local accumulation, per-die
 struct hf_long_statistics {
@@ -91,6 +91,7 @@ struct hf_long_usb_stats1 {
 struct hf_die_data {
 	int hash_clock;
 	double temp;
+	double board_temp;
 	time_t last_restart;
 };
 
@@ -105,6 +106,7 @@ struct hashfast_info {
 	struct hf_long_usb_stats1 stats1;
 	struct hf_die_data *die_data;
 	int hash_clock_rate;                        // Hash clock rate to use, in Mhz
+	int base_clock;                             // Clock rate we actually got
 	struct hf_usb_init_base usb_init_base;      // USB Base information from USB_INIT
 	struct hf_config_data config_data;          // Configuration data used from USB_INIT
 	int core_bitmap_size;                       // in bytes
