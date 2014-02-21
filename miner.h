@@ -240,9 +240,11 @@ static inline int fsync (int fd)
 	DRIVER_ADD_COMMAND(hashfast) \
 	DRIVER_ADD_COMMAND(klondike) \
 	DRIVER_ADD_COMMAND(knc) \
+	DRIVER_ADD_COMMAND(bitmineA1) \
 	DRIVER_ADD_COMMAND(drillbit) \
 	DRIVER_ADD_COMMAND(bab) \
 	DRIVER_ADD_COMMAND(minion) \
+	DRIVER_ADD_COMMAND(avalon2) \
 	DRIVER_ADD_COMMAND(avalon)
 
 #define DRIVER_PARSE_COMMANDS(DRIVER_ADD_COMMAND) \
@@ -428,7 +430,7 @@ struct cgpu_info {
 	struct cg_usb_info usbinfo;
 	bool blacklisted;
 #endif
-#ifdef USE_AVALON
+#if defined(USE_AVALON) || defined(USE_AVALON2)
 	struct work **works;
 	int work_array;
 	int queued;
@@ -966,7 +968,7 @@ extern bool opt_restart;
 #ifdef USE_ICARUS
 extern char *opt_icarus_options;
 extern char *opt_icarus_timing;
-extern int opt_anu_freq;
+extern float opt_anu_freq;
 #endif
 extern bool opt_worktime;
 extern bool opt_drdd;
@@ -982,6 +984,9 @@ extern char *opt_drillbit_options;
 #endif
 #ifdef USE_BAB
 extern char *opt_bab_options;
+#endif
+#ifdef USE_BITMINE_A1
+extern char *opt_bitmine_a1_options;
 #endif
 #ifdef USE_USBUTILS
 extern char *opt_usb_select;
@@ -1323,7 +1328,7 @@ struct work {
 	char		getwork_mode;
 };
 
-#ifdef USE_MODMINER 
+#ifdef USE_MODMINER
 struct modminer_fpga_state {
 	bool work_running;
 	struct work running_work;

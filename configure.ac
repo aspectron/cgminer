@@ -1,8 +1,8 @@
 ##--##--##--##--##--##--##--##--##--##--##--##--##--##--##--##--##
 ##--##--##--##--##--##--##--##--##--##--##--##--##--##--##--##--##
-m4_define([v_maj], [3])
-m4_define([v_min], [12])
-m4_define([v_mic], [3])
+m4_define([v_maj], [4])
+m4_define([v_min], [0])
+m4_define([v_mic], [0])
 ##--##--##--##--##--##--##--##--##--##--##--##--##--##--##--##--##
 m4_define([v_ver], [v_maj.v_min.v_mic])
 m4_define([lt_rev], m4_eval(v_maj + v_min))
@@ -192,6 +192,17 @@ if test "x$cointerra" = xyes; then
 fi
 AM_CONDITIONAL([HAS_COINTERRA], [test x$cointerra = xyes])
 
+bitmine_A1="no"
+
+AC_ARG_ENABLE([bitmine_A1],
+	[AC_HELP_STRING([--enable-bitmine_A1],[Compile support for Bitmine.ch A1 ASICs (default disabled)])],
+	[bitmine_A1=$enableval]
+	)
+if test "x$bitmine_A1" = xyes; then
+	AC_DEFINE([USE_BITMINE_A1], [1], [Defined to 1 if Bitmine A1 support is wanted])
+fi
+AM_CONDITIONAL([HAS_BITMINE_A1], [test x$bitmine_A1 = xyes])
+
 drillbit="no"
 
 AC_ARG_ENABLE([drillbit],
@@ -246,6 +257,19 @@ if test "x$knc" = xyes; then
 	AC_DEFINE([USE_KNC], [1], [Defined to 1 if KnC miner support is wanted])
 fi
 AM_CONDITIONAL([HAS_KNC], [test x$knc = xyes])
+
+avalon2="no"
+
+AC_ARG_ENABLE([avalon2],
+	[AC_HELP_STRING([--enable-avalon2],[Compile support for Avalon2 (default disabled)])],
+	[avalon2=$enableval]
+	)
+if test "x$avalon2" = xyes; then
+	AC_DEFINE([USE_FPGA_SERIAL], [1], [Defined to 1 if serial support required])
+	AC_DEFINE([USE_AVALON2], [1], [Defined to 1 if Avalon2 support is wanted])
+fi
+AM_CONDITIONAL([HAS_AVALON2], [test x$avalon2 = xyes])
+
 
 minion="no"
 
@@ -305,7 +329,7 @@ else
 	want_libbitfury=false
 fi
 
-AM_CONDITIONAL([NEED_FPGAUTILS], [test x$modminer != xno])
+AM_CONDITIONAL([NEED_FPGAUTILS], [test x$avalon2$modminer != xno])
 AM_CONDITIONAL([WANT_USBUTILS], [test x$want_usbutils != xfalse])
 AM_CONDITIONAL([WANT_LIBBITFURY], [test x$want_libbitfury != xfalse])
 AM_CONDITIONAL([HAVE_CURSES], [test x$curses = xyes])
@@ -479,6 +503,12 @@ else
 	echo "  Avalon.ASICs.........: Disabled"
 fi
 
+if test "x$avalon2" = xyes; then
+	echo "  Avalon2.ASICs........: Enabled"
+else
+	echo "  Avalon2.ASICs........: Disabled"
+fi
+
 if test "x$minion" = xyes; then
 	echo "  BlackArrowMinion.ASIC: Enabled"
 else
@@ -513,6 +543,12 @@ if test "x$cointerra" = xyes; then
 	echo "  Cointerra.ASICs......: Enabled"
 else
 	echo "  Cointerra.ASICs......: Disabled"
+fi
+
+if test "x$bitmine_A1" = xyes; then
+	echo "  Bitmine-A1.ASICs.....: Enabled"
+else
+	echo "  Bitmine-A1.ASICs.....: Disabled"
 fi
 
 if test "x$drillbit" = xyes; then
@@ -551,7 +587,7 @@ else
 	echo "  ModMiner.FPGAs.......: Disabled"
 fi
 
-if test "x$avalon$bab$bflsc$bitforce$bitfury$hashfast$icarus$klondike$knc$modminer$drillbit$minion$cointerra" = xnonononononononononononono; then
+if test "x$avalon$avalon2$bab$bflsc$bitforce$bitfury$hashfast$icarus$klondike$knc$modminer$drillbit$minion$cointerra$bitmine_A1" = xnonononononononononononononono; then
 	AC_MSG_ERROR([No mining configured in])
 fi
 
@@ -565,7 +601,7 @@ echo
 echo "Installation...........: make install (as root if needed, with 'su' or 'sudo')"
 echo "  prefix...............: $prefix"
 echo
-if test "x$dlibusb" != xno; then
+if test "x$want_usbutils$dlibusb" = xyesyes; then
 echo "*** SYSTEM LIBUSB BEING ADDED - NOT RECOMMENDED UNLESS YOU ARE UNABLE TO COMPILE THE INCLUDED LIBUSB ***"
 echo
 fi

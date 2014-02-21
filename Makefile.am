@@ -14,6 +14,7 @@ EXTRA_DIST	= example.conf linux-usb-cgminer \
 		  API.class API.java api-example.c windows-build.txt \
 		  bitstreams/README API-README FPGA-README \
 		  bitforce-firmware-flash.c hexdump.c ASIC-README \
+		  A1-desk-board-selector.c A1-desk-board-selector-tca9535.c \
 		  01-cgminer.rules
 
 SUBDIRS		= lib compat ccan
@@ -82,6 +83,11 @@ if HAS_BITFURY
 cgminer_SOURCES += driver-bitfury.c driver-bitfury.h
 endif
 
+if HAS_BITMINE_A1
+cgminer_SOURCES += driver-SPI-bitmine-A1.c
+cgminer_SOURCES += spi-context.c spi-context.h
+endif
+
 if HAS_DRILLBIT
 cgminer_SOURCES += driver-drillbit.c driver-drillbit.h
 endif
@@ -100,6 +106,10 @@ endif
 
 if HAS_BAB
 cgminer_SOURCES += driver-bab.c
+endif
+
+if HAS_AVALON2
+cgminer_SOURCES += driver-avalon2.c driver-avalon2.h crc16.c crc.h
 endif
 
 if HAS_MINION

@@ -92,6 +92,11 @@ Currently the U1 USB sticks are supported and come up as ANU devices. They
 are also set up as per the USB ASICs below. They need no options to work well
 but will accept all the icarus options.
 
+
+BITMINE A1 devices
+
+Bitmine A1 devices need the --enable-bitmine_A1 compile option set.
+
 ---
 GETTING STARTED WITH USB ASICS
 
@@ -153,8 +158,22 @@ On OSX, like Linux, no drivers need to be installed. However some devices
 like the bitfury USB sticks automatically load a driver thinking they're a
 modem and the driver needs to be unloaded for cgminer to work:
 
-sudo kextunload -b com.apple.driver.AppleUSBCDC
-sudo kextunload -b com.apple.driver.AppleUSBCDCACMData
+ sudo kextunload -b com.apple.driver.AppleUSBCDC
+ sudo kextunload -b com.apple.driver.AppleUSBCDCACMData
+
+There may be a limit to the number of USB devices that you are allowed to start.
+The following set of commands, followed by a reboot will increase that:
+
+ sudo su
+ touch /etc/sysctl.conf
+ echo kern.sysv.semume=100 >> /etc/sysctl.conf
+ chown root:wheel /etc/sysctl.conf
+ chmod 0644 /etc/sysctl.conf
+
+Some devices need superuser access to mine on them so cgminer may need to
+be started with sudo
+i.e.:
+ sudo cgminer <insert commands here>
 
 
 ---
@@ -186,12 +205,13 @@ ANTMINER U1 DEVICES
 --anu-freq <arg>    Set AntminerU1 frequency in MHz, range 150-500 (default: 200)
 
 By default, Antminer U1 devices run at a clockspeed of 200. This command allows
-you to specify a chosen frequency to attempt to run all ANU devices at and the
-value must be in increments of 25. Note that cgminer reports hashrate ONLY
-FROM VALID HASHES so if you increase the frequency but your hashrate does not
-increase or it decreases and hardware errors start showing up, you have
-overclocked it too much. In the worst case scenario it will fail to start at
-too high a speed.
+you to specify a chosen frequency to attempt to run all ANU devices at. Cgminer
+will try to find the nearest frequency the device supports and will report if
+the frequency is not exactly as requested. Note that cgminer reports hashrate
+ONLY FROM VALID HASHES so if you increase the frequency but your hashrate does
+not increase or it decreases and hardware errors start showing up, you have
+overclocked it too much. In the worst case scenario it will fail to start at too
+high a speed. Most will run happily up to 250.
 
 
 AVALON AND BITBURNER DEVICES
@@ -466,6 +486,19 @@ the temp-overheat feature.
 
 Other undocumented hashfast command line options are for development purposes
 only at this stage and serve no useful purpose to end users.
+
+
+Bitmine A1 Devices
+
+--bitmine-a1-options <ref_clk>:<sys_clk>:<spi_clk>:<max_chip>
+ref_clk:  reference clock in kHz                      (default: 16000)
+sys_clk:  target system clock in kHz to be set in PLL (default: 250000)
+spi_clk:  SPI clock in kHz                            (default: 800)
+max_chip: [debug/testing] limit chip chain
+
+Set 0 for fields you want to keep untouched to default, e.g.
+--bitmine-a1-options 0:0:400
+to only set SPI clock to 400kHz
 
 ---
 

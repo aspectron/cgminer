@@ -101,6 +101,9 @@ If building on Red Hat:
         sudo yum install autoconf automake autoreconf libtool openssl-compat-bitcoin-devel.x86_64 \
                          curl libcurl libcurl-devel openssh
 
+If building on Ubuntu:
+	sudo apt-get install build-essential autoconf automake libtool libcurl3-dev libudev-dev
+
 CGMiner specific configuration options:
   --enable-avalon         Compile support for Avalon (default disabled)
   --enable-bab            Compile support for BlackArrow Bitfury (default
@@ -332,14 +335,22 @@ On OSX, like Linux, no drivers need to be installed. However some devices
 like the bitfury USB sticks automatically load a driver thinking they're a
 modem and the driver needs to be unloaded for cgminer to work:
 
-sudo kextunload -b com.apple.driver.AppleUSBCDC
-sudo kextunload -b com.apple.driver.AppleUSBCDCACMData
+ sudo kextunload -b com.apple.driver.AppleUSBCDC
+ sudo kextunload -b com.apple.driver.AppleUSBCDCACMData
+
+There may be a limit to the number of USB devices that you are allowed to start.
+The following set of commands, followed by a reboot will increase that:
+
+ sudo su
+ touch /etc/sysctl.conf
+ echo kern.sysv.semume=100 >> /etc/sysctl.conf
+ chown root:wheel /etc/sysctl.conf
+ chmod 0644 /etc/sysctl.conf
 
 Some devices need superuser access to mine on them so cgminer may need to
 be started with sudo
 i.e.:
-sudo cgminer <insert commands here>
-
+ sudo cgminer <insert commands here>
 
 
 ---
@@ -408,7 +419,21 @@ WHILE RUNNING:
 
 The following options are available while running with a single keypress:
 
-[P]ool management [S]ettings [D]isplay options [Q]uit
+ [U]SB device management [P]ool management [S]ettings [D]isplay options [Q]uit
+
+
+U gives you:
+
+[S]ummary of device information
+[E]nable device
+[D]isable device
+[U]nplug to allow hotplug restart
+[R]eset device USB
+[L]ist all known devices
+[B]lacklist current device from current instance of cgminer
+[W]hitelist previously blacklisted device
+[H]otplug interval (0 to disable)
+
 
 P gives you:
 
@@ -680,6 +705,16 @@ For RPC API details see the API-README file
 ---
 
 FAQ
+
+Q: I have multiple USB stick devices but I can't get them all to work at once?
+A: Very few USB hubs deliver the promised power required to run as many devices
+as they fit if all of them draw power from USB.
+
+Q: I've plugged my devices into my USB hub but nothing shows up?
+A: RPis and Windows have incomplete or non-standard USB3 support so they may
+never work. It may be possible to get a USB3 hub to work by plugging it into
+a USB2 hub. When choosing a hub, USB2 hubs are preferable whenever possible
+due to better support all round.
 
 Q: Can I mine on servers from different networks (eg xxxcoin and bitcoin) at
 the same time?
