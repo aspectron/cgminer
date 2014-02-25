@@ -25,9 +25,10 @@ bool opt_hfa_dfu_boot;
 int opt_hfa_fan_default;
 int opt_hfa_fan_max;
 int opt_hfa_fan_min;
-int opt_hfa_autoclock;
+int opt_hfa_fail_drop;
 
 char *set_hfa_fan(char *arg);
+char *opt_hfa_name;
 
 #define HASHFAST_MINER_THREADS 1
 #define HFA_CLOCK_DEFAULT 550
@@ -96,6 +97,8 @@ struct hf_die_data {
 };
 
 struct hashfast_info {
+	struct cgpu_info *cgpu;                     // Points back to parent structure
+	struct cgpu_info *old_cgpu  ;               // Points to old structure if hotplugged same device
 	int asic_count;                             // # of chips in the chain
 	int core_count;                             // # of cores per chip
 	int device_type;                            // What sort of device this is
@@ -113,6 +116,8 @@ struct hashfast_info {
 	uint32_t *core_bitmap;                      // Core OK bitmap test results, run with PLL Bypassed
 	int group_ntime_roll;                       // Total ntime roll amount per group
 	int core_ntime_roll;                        // Total core ntime roll amount
+	uint32_t serial_number;                     // db->serial_number if it exists
+	char op_name[36];
 
 	pthread_mutex_t lock;
 	pthread_mutex_t rlock;

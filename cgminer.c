@@ -695,12 +695,10 @@ static char *set_int_0_to_10(const char *arg, int *i)
 	return set_int_range(arg, i, 0, 10);
 }
 
-#if (defined USE_AVALON)||(defined USE_COINTERRA)
-static char *set_int_0_to_100(const char *arg, int *i)
+static char __maybe_unused *set_int_0_to_100(const char *arg, int *i)
 {
 	return set_int_range(arg, i, 0, 100);
 }
-#endif
 
 #ifdef USE_COINTERRA
 static char *set_int_0_to_255(const char *arg, int *i)
@@ -1325,9 +1323,15 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITH_ARG("--hfa-hash-clock",
 		     set_int_0_to_9999, opt_show_intval, &opt_hfa_hash_clock,
 		     "Set hashfast clock speed"),
+	OPT_WITH_ARG("--hfa-fail-drop",
+		     set_int_0_to_100, opt_show_intval, &opt_hfa_fail_drop,
+		     "Set how many MHz to drop clockspeed each failure on an overlocked hashfast device"),
 	OPT_WITH_ARG("--hfa-fan",
 		     set_hfa_fan, NULL, NULL,
 		     "Set fanspeed percentage for hashfast, single value or range (default: 10-85)"),
+	OPT_WITH_ARG("--hfa-name",
+		     opt_set_charp, NULL, &opt_hfa_name,
+		     "Set a unique name for a single hashfast device specified with --usb or the first device found"),
 	OPT_WITH_ARG("--hfa-ntime-roll",
 		     opt_set_intval, NULL, &opt_hfa_ntime_roll,
 		     opt_hidden),
@@ -6512,6 +6516,13 @@ static void gen_stratum_work(struct pool *pool, struct work *work)
 	cgtime(&work->tv_staged);
 }
 
+/* The time difference in seconds between when this device last got work via
+ * get_work() and generated a valid share. */
+int share_work_tdiff(struct cgpu_info *cgpu)
+{
+	return last_getwork - cgpu->last_device_valid_work;
+}
+
 struct work *get_work(struct thr_info *thr, const int thr_id)
 {
 	struct work *work = NULL;
@@ -7224,6 +7235,7 @@ void *miner_thread(void *userdata)
 	cgsem_wait(&mythr->sem);
 
 	set_highprio();
+	cgpu->last_device_valid_work = time(NULL);
 	drv->hash_work(mythr);
 out:
 	drv->thread_shutdown(mythr);

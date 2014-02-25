@@ -199,6 +199,8 @@ struct ICARUS_INFO {
 	int read_time;
 	// ms limit for (short=/long=) read_time
 	int read_time_limit;
+	// How long without hashes is considered a failed device
+	int fail_time;
 
 	enum timing_mode timing_mode;
 	bool do_icarus_timing;
@@ -527,7 +529,7 @@ static void set_timing_mode(int this_option_offset, struct cgpu_info *icarus)
 {
 	struct ICARUS_INFO *info = (struct ICARUS_INFO *)(icarus->device_data);
 	enum sub_ident ident;
-	double Hs;
+	double Hs, fail_time;
 	char buf[BUFSIZ+1];
 	char *ptr, *comma, *eq;
 	size_t max;
@@ -664,6 +666,11 @@ static void set_timing_mode(int this_option_offset, struct cgpu_info *icarus)
 			icarus->drv->name, icarus->cgminer_id,
 			timing_mode_str(info->timing_mode),
 			info->read_time, info->read_time_limit, info->Hs);
+
+	/* Set the time to detect a dead device to 25 full nonce ranges. */
+	fail_time = info->Hs * 0xffffffffull * 25.0;
+	/* Integer accuracy is definitely enough. */
+	info->fail_time = fail_time;
 }
 
 static uint32_t mask(int work_division)
@@ -1276,16 +1283,16 @@ static int64_t icarus_scanwork(struct thr_info *thr)
 	uint32_t values;
 	int64_t hash_count_range;
 
-	if (unlikely(last_getwork - icarus->last_device_valid_work > 60)) {
+	if (unlikely(share_work_tdiff(icarus) > info->fail_time)) {
 		if (info->failing) {
-			if (last_getwork - icarus->last_device_valid_work > 120) {
+			if (share_work_tdiff(icarus) > info->fail_time + 60) {
 				applog(LOG_ERR, "%s %d: Device failed to respond to restart",
 				       icarus->drv->name, icarus->device_id);
 				return -1;
 			}
 		} else {
-			applog(LOG_WARNING, "%s %d: No valid hashes for over 1 minute, attempting to reset",
-			       icarus->drv->name, icarus->device_id);
+			applog(LOG_WARNING, "%s %d: No valid hashes for over %d secs, attempting to reset",
+			       icarus->drv->name, icarus->device_id, info->fail_time);
 			usb_reset(icarus);
 			info->failing = true;
 		}
@@ -1358,12 +1365,17 @@ static int64_t icarus_scanwork(struct thr_info *thr)
 	memcpy((char *)&nonce, nonce_bin, ICARUS_READ_SIZE);
 	nonce = htobe32(nonce);
 	curr_hw_errors = icarus->hw_errors;
-	submit_nonce(thr, work, nonce);
-	was_hw_error = (curr_hw_errors > icarus->hw_errors);
+	if (submit_nonce(thr, work, nonce))
+		info->failing = false;
+	was_hw_error = (curr_hw_errors < icarus->hw_errors);
 
-	hash_count = (nonce & info->nonce_mask);
-	hash_count++;
-	hash_count *= info->fpga_count;
+	if (was_hw_error)
+		hash_count = 0;
+	else {
+		hash_count = (nonce & info->nonce_mask);
+		hash_count++;
+		hash_count *= info->fpga_count;
+	}
 
 #if 0
 	// This appears to only return zero nonce values
@@ -1495,8 +1507,6 @@ static int64_t icarus_scanwork(struct thr_info *thr)
 out:
 	free_work(work);
 
-	if (hash_count > 0)
-		info->failing = false;
 	return hash_count;
 }
 

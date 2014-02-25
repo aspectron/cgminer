@@ -59,7 +59,6 @@ static cgtimer_t usb11_cgt;
 #define BITFURY_TIMEOUT_MS 999
 #define DRILLBIT_TIMEOUT_MS 999
 #define ICARUS_TIMEOUT_MS 999
-#define HASHFAST_TIMEOUT_MS 999
 
 #ifdef WIN32
 #define BFLSC_TIMEOUT_MS 999
@@ -68,6 +67,7 @@ static cgtimer_t usb11_cgt;
 #define AVALON_TIMEOUT_MS 999
 #define KLONDIKE_TIMEOUT_MS 999
 #define COINTERRA_TIMEOUT_MS 999
+#define HASHFAST_TIMEOUT_MS 999
 
 /* The safety timeout we use, cancelling async transfers on windows that fail
  * to timeout on their own. */
@@ -80,6 +80,7 @@ static cgtimer_t usb11_cgt;
 #define AVALON_TIMEOUT_MS 200
 #define KLONDIKE_TIMEOUT_MS 200
 #define COINTERRA_TIMEOUT_MS 200
+#define HASHFAST_TIMEOUT_MS 500
 #endif
 
 #define USB_EPS(_intx, _epinfosx) { \
@@ -2746,7 +2747,9 @@ err_retry:
 	}
 	if (err == LIBUSB_ERROR_IO && ++err_retries < USB_RETRY_MAX)
 		goto err_retry;
-	if (*transferred && (endpoint & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_IN)
+	if (NODEV(err))
+		*transferred = 0;
+	else if ((endpoint & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_IN)
 		memcpy(data, buf, *transferred);
 
 	return err;

@@ -27,7 +27,9 @@ bool opt_hfa_dfu_boot;
 int opt_hfa_fan_default = HFA_FAN_DEFAULT;
 int opt_hfa_fan_max = HFA_FAN_MAX;
 int opt_hfa_fan_min = HFA_FAN_MIN;
-int opt_hfa_autoclock = 0;
+int opt_hfa_fail_drop = 10;
+
+char *opt_hfa_name;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Support for the CRC's used in header (CRC-8) and packet body (CRC-32)
@@ -133,7 +135,8 @@ static const struct hfa_cmd hfa_cmds[] = {
 	{OP_PING, "OP_PING", C_HF_PING},
 	{OP_CORE_MAP, "OP_CORE_MAP", C_NULL},
 	{OP_VERSION, "OP_VERSION", C_NULL},			// 32
-	{OP_FAN, "OP_FAN", C_HF_FAN}
+	{OP_FAN, "OP_FAN", C_HF_FAN},
+	{OP_NAME, "OP_NAME", C_OP_NAME}
 };
 
 #define HF_USB_CMD_OFFSET (128 - 18)
@@ -303,8 +306,55 @@ static const char *hf_usb_init_errors[] = {
 	"Main board FPGA register read/write test failed",
 	"ASIC core power fault",
 	"Dynamic baud rate change timeout",
-	"Address failure"
+	"Address failure",
+	"Regulator programming error",
+	"Address range inconsistent after mixed reconfiguration",
+	"Timeout after mixed reconfiguration"
 };
+
+static bool hfa_clear_readbuf(struct cgpu_info *hashfast);
+
+struct op_nameframe {
+	struct hf_header h;
+	char name[32];
+} __attribute__((packed));
+
+static void hfa_write_opname(struct cgpu_info *hashfast, struct hashfast_info *info)
+{
+	const uint8_t opcode = HF_USB_CMD(OP_NAME);
+	struct op_nameframe nameframe;
+	struct hf_header *h = (struct hf_header *)&nameframe;
+	const int tx_length = sizeof(struct op_nameframe);
+
+	memset(&nameframe, 0, sizeof(nameframe));
+	strncpy(nameframe.name, info->op_name, 30);
+	h->preamble = HF_PREAMBLE;
+	h->operation_code = hfa_cmds[opcode].cmd;
+	h->core_address = 1;
+	h->data_length = 32 / 4;
+	h->crc8 = hfa_crc8((unsigned char *)h);
+	applog(LOG_DEBUG, "%s %d: Opname being set to %s", hashfast->drv->name,
+	       hashfast->device_id, info->op_name);
+	__hfa_send_frame(hashfast, opcode, tx_length, (uint8_t *)&nameframe);
+}
+
+/* If no opname or an invalid opname is set, change it to the serial number if
+ * it exists, or a random name based on timestamp if not. */
+static void hfa_choose_opname(struct cgpu_info *hashfast, struct hashfast_info *info)
+{
+	uint64_t usecs;
+
+	if (info->serial_number)
+		sprintf(info->op_name, "%x", info->serial_number);
+	else {
+		struct timeval tv_now;
+
+		cgtime(&tv_now);
+		usecs = (uint64_t)(tv_now.tv_sec) * (uint64_t)1000000 + (uint64_t)tv_now.tv_usec;
+		sprintf(info->op_name, "%lx", (long unsigned int)usecs);
+	}
+	hfa_write_opname(hashfast, info);
+}
 
 static bool hfa_reset(struct cgpu_info *hashfast, struct hashfast_info *info)
 {
@@ -330,6 +380,7 @@ static bool hfa_reset(struct cgpu_info *hashfast, struct hashfast_info *info)
 	hu->preamble = HF_PREAMBLE;
 	hu->operation_code = OP_USB_INIT;
 	hu->protocol = PROTOCOL_GLOBAL_WORK_QUEUE;	// Protocol to use
+	hu->shed_supported = true;
 	// Force PLL bypass
 	hu->pll_bypass = opt_hfa_pll_bypass;
 	hu->hash_clock = info->hash_clock_rate;		// Hash clock rate in Mhz
@@ -345,6 +396,9 @@ static bool hfa_reset(struct cgpu_info *hashfast, struct hashfast_info *info)
 	       hashfast->drv->name, hashfast->device_id);
 resend:
 	if (unlikely(hashfast->usbinfo.nodev))
+		return false;
+
+	if (!hfa_clear_readbuf(hashfast))
 		return false;
 
 	if (!hfa_send_packet(hashfast, (struct hf_header *)hu, HF_USB_CMD(OP_USB_INIT)))
@@ -422,7 +476,6 @@ tryagain:
 	       db->inflight_target);
 	applog(LOG_INFO, "%s %d:      sequence_modulus: %d", hashfast->drv->name, hashfast->device_id,
 	       db->sequence_modulus);
-	info->num_sequence = db->sequence_modulus;
 
 	// Now a copy of the config data used
 	if (!hfa_get_data(hashfast, (char *)&info->config_data, U32SIZE(info->config_data))) {
@@ -454,8 +507,43 @@ tryagain:
 		       hashfast->drv->name, hashfast->device_id);
 		return false;
 	}
+	info->num_sequence = db->sequence_modulus;
+	info->serial_number = db->serial_number;
 	info->base_clock = db->hash_clockrate;
 
+	hfa_clear_readbuf(hashfast);
+
+	/* Try sending and receiving an OP_NAME */
+	if (!hfa_send_frame(hashfast, HF_USB_CMD(OP_NAME), 0, (uint8_t *)NULL, 0)) {
+		applog(LOG_WARNING, "%s %d: Failed to send OP_NAME!", hashfast->drv->name,
+		       hashfast->device_id);
+		return false;
+	}
+	ret = hfa_get_header(hashfast, h, &hcrc);
+	if (!ret) {
+		applog(LOG_WARNING, "%s %d: Failed to receive OP_NAME response", hashfast->drv->name,
+		       hashfast->device_id);
+		return false;
+	}
+	/* Only try to parse the name if the firmware supports OP_NAME */
+	if (h->operation_code == OP_NAME) {
+		if (!hfa_get_data(hashfast, info->op_name, 32)) {
+			applog(LOG_WARNING, "%s %d: OP_NAME failed! Failure to get op_name data",
+			       hashfast->drv->name, hashfast->device_id);
+			return false;
+		}
+		for (i = 0; i < 32; i++) {
+			if (i > 0 && info->op_name[i] == '\0')
+				break;
+			/* Make sure the op_name is valid ascii only */
+			if (info->op_name[i] < 32 || info->op_name[i] > 126) {
+				hfa_choose_opname(hashfast, info);
+				break;
+			}
+		}
+		applog(LOG_INFO, "%s %d: Opname set to %s", hashfast->drv->name,
+		       hashfast->device_id, info->op_name);
+	}
 	return true;
 }
 
@@ -470,7 +558,7 @@ static bool hfa_clear_readbuf(struct cgpu_info *hashfast)
 			break;
 		}
 		ret = usb_read(hashfast, buf, 512, &amount, C_HF_CLEAR_READ);
-	} while (!ret || amount);
+	} while (!ret && amount);
 
 	if (ret && ret != LIBUSB_ERROR_TIMEOUT)
 		return false;
@@ -487,8 +575,6 @@ static bool hfa_send_shutdown(struct cgpu_info *hashfast)
 	 * discard any work it thinks is in flight for a cleaner restart. */
 	if (!hfa_send_frame(hashfast, HF_USB_CMD(OP_WORK_RESTART), 0, (uint8_t *)NULL, 0))
 		return ret;
-	if (!hfa_clear_readbuf(hashfast))
-		return ret;
 	if (hfa_send_frame(hashfast, HF_USB_CMD(OP_USB_SHUTDOWN), 0, NULL, 0)) {
 		/* Wait to allow device to properly shut down. */
 		cgsleep_ms(1000);
@@ -497,10 +583,66 @@ static bool hfa_send_shutdown(struct cgpu_info *hashfast)
 	return ret;
 }
 
+static struct cgpu_info *hfa_old_device(struct cgpu_info *hashfast, struct hashfast_info *info)
+{
+	struct cgpu_info *cgpu, *found = NULL;
+	struct hashfast_info *cinfo = NULL;
+	int i;
+
+	/* If the device doesn't have a serial number, don't try to match it
+	 * with a zombie instance. */
+	if (!info->serial_number)
+		return false;
+
+	/* See if we can find a zombie instance of the same device */
+	for (i = 0; i < mining_threads; i++) {
+		cgpu = mining_thr[i]->cgpu;
+		if (!cgpu)
+			continue;
+		if (cgpu == hashfast)
+			continue;
+		if (cgpu->drv->drv_id != DRIVER_hashfast)
+			continue;
+		if (!cgpu->usbinfo.nodev)
+			continue;
+		cinfo = cgpu->device_data;
+		if (!cinfo)
+			continue;
+		if (info->op_name[0] != '\0' && !strncmp(info->op_name, cinfo->op_name, 32)) {
+			applog(LOG_DEBUG, "%s %d: Found old device based on OP_NAME %s",
+			       hashfast->drv->name, hashfast->device_id, info->op_name);
+			found = cgpu;
+			break;
+		}
+		if (info->serial_number == cinfo->serial_number) {
+			applog(LOG_DEBUG, "%s %d: Found old device based on serial number %x",
+			       hashfast->drv->name, hashfast->device_id, info->serial_number);
+			found = cgpu;
+			break;
+		}
+	}
+	return found;
+}
+
+static void hfa_set_clock(struct cgpu_info *hashfast, struct hashfast_info *info)
+{
+	uint16_t hdata;
+	int i;
+
+	hdata = (WR_CLOCK_VALUE << WR_COMMAND_SHIFT) | info->hash_clock_rate;
+
+	hfa_send_frame(hashfast, HF_USB_CMD(OP_WORK_RESTART), hdata, (uint8_t *)NULL, 0);
+	/* We won't know what the real clock is in this case without a
+	 * usb_init_base message so we have to assume it's what we asked. */
+	info->base_clock = info->hash_clock_rate;
+	for (i = 0; i < info->asic_count; i++)
+		info->die_data[i].hash_clock = info->base_clock;
+}
+
 static bool hfa_detect_common(struct cgpu_info *hashfast)
 {
 	struct hashfast_info *info;
-	bool ret;
+	bool ret = false;
 	int i;
 
 	info = calloc(sizeof(struct hashfast_info), 1);
@@ -510,16 +652,13 @@ static bool hfa_detect_common(struct cgpu_info *hashfast)
 
 	/* hashfast_reset should fill in details for info */
 	ret = hfa_reset(hashfast, info);
-	if (!ret) {
-		hfa_send_shutdown(hashfast);
-		hfa_clear_readbuf(hashfast);
-		free(info);
-		hashfast->device_data = NULL;
-		return false;
-	}
+	if (!ret)
+		goto out;
 
-	if (hashfast->usbinfo.nodev)
-		return false;
+	if (hashfast->usbinfo.nodev) {
+		ret = false;
+		goto out;
+	}
 
 	// The per-die status array
 	info->die_status = calloc(info->asic_count, sizeof(struct hf_g1_die_data));
@@ -541,19 +680,43 @@ static bool hfa_detect_common(struct cgpu_info *hashfast)
 	if (!info->works)
 		quit(1, "Failed to calloc info works in hfa_detect_common");
 
-	return true;
+	info->cgpu = hashfast;
+	/* Look for a matching zombie instance and inherit values from it if it
+	 * exists. */
+	info->old_cgpu = hfa_old_device(hashfast, info);
+	if (info->old_cgpu) {
+		struct hashfast_info *cinfo = info->old_cgpu->device_data;
+
+		applog(LOG_INFO, "Found matching zombie device for %s %d at device %d",
+		       hashfast->drv->name, hashfast->device_id, info->old_cgpu->device_id);
+		info->resets = cinfo->resets;
+		/* Set the device with the last hash_clock_rate if it's
+		 * different. */
+		if (info->hash_clock_rate != cinfo->hash_clock_rate) {
+			info->hash_clock_rate = cinfo->hash_clock_rate;
+			hfa_set_clock(hashfast, info);
+		}
+	}
+out:
+	if (!ret) {
+		hfa_send_shutdown(hashfast);
+		hfa_clear_readbuf(hashfast);
+		free(info);
+		hashfast->device_data = NULL;
+	}
+	return ret;
 }
 
 static bool hfa_initialise(struct cgpu_info *hashfast)
 {
-	int err;
+	int err = 7;
 
 	if (hashfast->usbinfo.nodev)
 		return false;
 
 	if (!hfa_clear_readbuf(hashfast))
 		return false;
-
+#ifdef WIN32
 	err = usb_transfer(hashfast, 0, 9, 1, 0, C_ATMEL_RESET);
 	if (!err)
 		err = usb_transfer(hashfast, 0x21, 0x22, 0, 0, C_ATMEL_OPEN);
@@ -571,6 +734,7 @@ static bool hfa_initialise(struct cgpu_info *hashfast)
 		applog(LOG_INFO, "%s %d: Failed to open with error %s",
 		       hashfast->drv->name, hashfast->device_id, libusb_error_name(err));
 	}
+#endif
 	/* Must have transmitted init sequence sized buffer */
 	return (err == 7);
 }
@@ -610,6 +774,7 @@ static struct cgpu_info *hfa_detect_one(libusb_device *dev, struct usb_find_devi
 	if (opt_hfa_dfu_boot) {
 		hfa_dfu_boot(hashfast);
 		hashfast = usb_free_cgpu(hashfast);
+		opt_hfa_dfu_boot = false;
 		return NULL;
 	}
 	if (!hfa_detect_common(hashfast)) {
@@ -619,6 +784,17 @@ static struct cgpu_info *hfa_detect_one(libusb_device *dev, struct usb_find_devi
 	}
 	if (!add_cgpu(hashfast))
 		return NULL;
+
+	if (opt_hfa_name) {
+		struct hashfast_info *info = hashfast->device_data;
+
+		strncpy(info->op_name, opt_hfa_name, 30);
+		applog(LOG_NOTICE, "%s %d %03d:%03d: Writing name %s", hashfast->drv->name,
+		       hashfast->device_id, hashfast->usbinfo.bus_number, hashfast->usbinfo.device_address,
+		       info->op_name);
+		hfa_write_opname(hashfast, info);
+		opt_hfa_name = NULL;
+	}
 
 	return hashfast;
 }
@@ -659,7 +835,7 @@ out:
 	return ret;
 }
 
-static bool hfa_running_reset(struct cgpu_info *hashfast, struct hashfast_info *info);
+static void hfa_running_shutdown(struct cgpu_info *hashfast, struct hashfast_info *info);
 
 static void hfa_parse_gwq_status(struct cgpu_info *hashfast, struct hashfast_info *info,
 				 struct hf_header *h)
@@ -673,15 +849,9 @@ static void hfa_parse_gwq_status(struct cgpu_info *hashfast, struct hashfast_inf
 
 	/* This is a special flag that the thermal overload has been tripped */
 	if (unlikely(h->core_address & 0x80)) {
-		applog(LOG_ERR, "%s %d Thermal overload tripped! Resetting device",
+		applog(LOG_ERR, "%s %d Thermal overload tripped! Shutting down device",
 		       hashfast->drv->name, hashfast->device_id);
-		if (hfa_running_reset(hashfast, info)) {
-			applog(LOG_NOTICE, "%s %d: Succesfully reset, continuing operation",
-			       hashfast->drv->name, hashfast->device_id);
-			return;
-		}
-		applog(LOG_WARNING, "%s %d Failed to reset device, killing off thread to allow re-hotplug",
-		       hashfast->drv->name, hashfast->device_id);
+		hfa_running_shutdown(hashfast, info);
 		usb_nodev(hashfast);
 		return;
 	}
@@ -1011,6 +1181,10 @@ static bool hfa_prepare(struct thr_info *thr)
 	struct hashfast_info *info = hashfast->device_data;
 	struct timeval now;
 
+	/* Inherit the old device id */
+	if (info->old_cgpu)
+		hashfast->device_id = info->old_cgpu->device_id;
+
 	mutex_init(&info->lock);
 	mutex_init(&info->rlock);
 	if (pthread_create(&info->read_thr, NULL, hfa_read, (void *)thr))
@@ -1023,6 +1197,13 @@ static bool hfa_prepare(struct thr_info *thr)
 	hfa_set_fanspeed(hashfast, info, opt_hfa_fan_default);
 
 	return true;
+}
+
+/* If this ever returns 0 it means we have shed all the cores which will lead
+ * to no work being done which will trigger the watchdog. */
+static inline int hfa_basejobs(struct hashfast_info *info)
+{
+	return info->usb_init_base.inflight_target - info->shed_count;
 }
 
 /* Figure out how many jobs to send. */
@@ -1042,12 +1223,15 @@ static int hfa_jobs(struct cgpu_info *hashfast, struct hashfast_info *info)
 	}
 
 	mutex_lock(&info->lock);
-	ret = info->usb_init_base.inflight_target - HF_SEQUENCE_DISTANCE(info->hash_sequence_head, info->device_sequence_tail);
+	ret = hfa_basejobs(info) - HF_SEQUENCE_DISTANCE(info->hash_sequence_head, info->device_sequence_tail);
 	/* Place an upper limit on how many jobs to queue to prevent sending
-	 * more  work than the device can use after a period of outage. */
-	if (ret > info->usb_init_base.inflight_target)
-		ret = info->usb_init_base.inflight_target;
+	 * more work than the device can use after a period of outage. */
+	if (ret > hfa_basejobs(info))
+		ret = hfa_basejobs(info);
 	mutex_unlock(&info->lock);
+
+	if (unlikely(ret < 0))
+		ret = 0;
 
 out:
 	return ret;
@@ -1201,7 +1385,7 @@ static void hfa_temp_clock(struct cgpu_info *hashfast, struct hashfast_info *inf
 		if (temp_change > 0) {
 			/* Temp rising, tweak fanspeed up */
 			if (info->fanspeed < opt_hfa_fan_max)
-				hfa_set_fanspeed(hashfast, info, 1);
+				hfa_set_fanspeed(hashfast, info, 2);
 		} else if (temp_change < 0) {
 			/* Temp falling, tweak fanspeed down */
 			if (info->fanspeed > opt_hfa_fan_min)
@@ -1268,28 +1452,38 @@ dies_only:
 	}
 }
 
-static bool hfa_running_reset(struct cgpu_info *hashfast, struct hashfast_info *info)
+static void hfa_running_shutdown(struct cgpu_info *hashfast, struct hashfast_info *info)
 {
-	bool ret;
-	int i;
+	/* If the device has already disapperaed, don't drop the clock in case
+	 * it was just unplugged as opposed to a failure. */
+	if (hashfast->usbinfo.nodev)
+		return;
 
-	ret = hfa_send_shutdown(hashfast);
-	if (!ret)
-		goto out;
+	if (info->hash_clock_rate > HFA_CLOCK_DEFAULT && opt_hfa_fail_drop) {
+		info->hash_clock_rate -= opt_hfa_fail_drop;
+		if (info->hash_clock_rate < HFA_CLOCK_DEFAULT)
+			info->hash_clock_rate = HFA_CLOCK_DEFAULT;
+		if (info->old_cgpu && info->old_cgpu->device_data) {
+			struct hashfast_info *cinfo = info->old_cgpu->device_data;
 
-	/* hfa_reset is the only other place we read from the device so we must
-	 * inhibit the read thread from reading our response to the
-	 * OP_USB_INIT */
+			/* Set the master device's clock speed if this is a copy */
+			cinfo->hash_clock_rate = info->hash_clock_rate;
+		}
+		applog(LOG_WARNING, "%s %d: Decreasing clock speed to %d with reset",
+			hashfast->drv->name, hashfast->device_id, info->hash_clock_rate);
+	}
+
+	if (!hfa_send_shutdown(hashfast))
+		return;
+
+	if (hashfast->usbinfo.nodev)
+		return;
+
 	mutex_lock(&info->rlock);
-	ret = hfa_clear_readbuf(hashfast);
-	if (ret)
-		ret = hfa_reset(hashfast, info);
-	for (i = 0; i < info->asic_count; i++)
-		info->die_data[i].hash_clock = info->base_clock;
+	hfa_clear_readbuf(hashfast);
 	mutex_unlock(&info->rlock);
 
-out:
-	return ret;
+	usb_nodev(hashfast);
 }
 
 static int64_t hfa_scanwork(struct thr_info *thr)
@@ -1297,6 +1491,7 @@ static int64_t hfa_scanwork(struct thr_info *thr)
 	struct cgpu_info *hashfast = thr->cgpu;
 	struct hashfast_info *info = hashfast->device_data;
 	int jobs, ret, cycles = 0;
+	double fail_time;
 	int64_t hashes;
 
 	if (unlikely(hashfast->usbinfo.nodev)) {
@@ -1305,24 +1500,15 @@ static int64_t hfa_scanwork(struct thr_info *thr)
 		return -1;
 	}
 
-	if (unlikely(last_getwork - hashfast->last_device_valid_work > 15)) {
-		applog(LOG_WARNING, "%s %d: No valid hashes for over 15 seconds, attempting to reset",
-		       hashfast->drv->name, hashfast->device_id);
-		if (info->hash_clock_rate > HFA_CLOCK_DEFAULT) {
-			info->hash_clock_rate -= 10;
-			if (info->hash_clock_rate < opt_hfa_hash_clock)
-				opt_hfa_hash_clock = info->hash_clock_rate;
-			applog(LOG_WARNING, "%s %d: Decreasing clock speed to %d with reset",
-			       hashfast->drv->name, hashfast->device_id, info->hash_clock_rate);
-		}
-		ret = hfa_running_reset(hashfast, info);
-		if (!ret) {
-			applog(LOG_ERR, "%s %d: Failed to reset after hash failure, disabling",
-			       hashfast->drv->name, hashfast->device_id);
-			return -1;
-		}
-		applog(LOG_NOTICE, "%s %d: Reset successful", hashfast->drv->name,
-		       hashfast->device_id);
+	/* Base the fail time on no valid nonces for 25 full nonce ranges at
+	 * the current expected hashrate. */
+	fail_time = 25.0 * (double)hashfast->drv->max_diff * 0xffffffffull /
+		(double)(info->base_clock * 1000000) / hfa_basejobs(info);
+	if (unlikely(share_work_tdiff(hashfast) > fail_time)) {
+		applog(LOG_WARNING, "%s %d: No valid hashes for over %.0f seconds, shutting down thread",
+		       hashfast->drv->name, hashfast->device_id, fail_time);
+		hfa_running_shutdown(hashfast, info);
+		return -1;
 	}
 
 	if (unlikely(thr->work_restart)) {
@@ -1331,16 +1517,12 @@ restart:
 		thr->work_restart = false;
 		ret = hfa_send_frame(hashfast, HF_USB_CMD(OP_WORK_RESTART), 0, (uint8_t *)NULL, 0);
 		if (unlikely(!ret)) {
-			ret = hfa_running_reset(hashfast, info);
-			if (unlikely(!ret)) {
-				applog(LOG_ERR, "%s %d: Failed to reset after write failure, disabling",
-				       hashfast->drv->name, hashfast->device_id);
-				return -1;
-			}
+			hfa_running_shutdown(hashfast, info);
+			return -1;
 		}
 		/* Give a full allotment of jobs after a restart, not waiting
 		 * for the status update telling us how much to give. */
-		jobs = info->usb_init_base.inflight_target;
+		jobs = hfa_basejobs(info);
 	} else {
 		/* Only adjust die clocks if there's no restart since two
 		 * restarts back to back get ignored. */
@@ -1392,12 +1574,8 @@ restart:
 			sequence = 0;
 		ret = hfa_send_frame(hashfast, OP_HASH, sequence, (uint8_t *)&op_hash_data, sizeof(op_hash_data));
 		if (unlikely(!ret)) {
-			ret = hfa_running_reset(hashfast, info);
-			if (unlikely(!ret)) {
-				applog(LOG_ERR, "%s %d: Failed to reset after write failure, disabling",
-				       hashfast->drv->name, hashfast->device_id);
-				return -1;
-			}
+			hfa_running_shutdown(hashfast, info);
+			return -1;
 		}
 
 		mutex_lock(&info->lock);
@@ -1446,6 +1624,8 @@ static struct api_data *hfa_api_stats(struct cgpu_info *cgpu)
 	varint = db->sequence_modulus;
 	root = api_add_int(root, "sequence modulus", &varint, true);
 	root = api_add_int(root, "fan percent", &info->fanspeed, false);
+	if (info->op_name[0] != '\0')
+		root = api_add_string(root, "op name", info->op_name, false);
 
 	s1 = &info->stats1;
 	root = api_add_uint64(root, "rx preambles", &s1->usb_rx_preambles, false);
@@ -1521,20 +1701,11 @@ static void hfa_statline_before(char *buf, size_t bufsiz, struct cgpu_info *hash
 		    hashfast->temp, info->fanspeed, max_volt);
 }
 
-static bool hfa_get_stats(struct cgpu_info *cgpu)
+/* We cannot re-initialise so just shut down the device for it to hotplug
+ * again. */
+static void hfa_reinit(struct cgpu_info *hashfast)
 {
-	struct hashfast_info *info = cgpu->device_data;
-
-	// Device is gone
-	if (cgpu->usbinfo.nodev)
-		return false;
-
-	return true;
-}
-
-static void hfa_init(struct cgpu_info __maybe_unused *hashfast)
-{
-	hfa_reset(hashfast, hashfast->device_data);
+	hfa_running_shutdown(hashfast, hashfast->device_data);
 }
 
 static void hfa_free_all_work(struct hashfast_info *info)
@@ -1579,7 +1750,6 @@ struct device_drv hashfast_drv = {
 	.scanwork = hfa_scanwork,
 	.get_api_stats = hfa_api_stats,
 	.get_statline_before = hfa_statline_before,
-	.get_stats = hfa_get_stats,
-	.reinit_device = hfa_init,
+	.reinit_device = hfa_reinit,
 	.thread_shutdown = hfa_shutdown,
 };
