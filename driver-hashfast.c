@@ -836,7 +836,7 @@ static void hfa_detect(bool __maybe_unused hotplug)
 	/* Set up the CRC tables only once. */
 	if (!hfa_crc8_set)
 		hfa_init_crc8();
-	usb_detect(&hashfast_drv, hfa_detect_one);
+	usb_detect_one(&hashfast_drv, hfa_detect_one);
 }
 
 static bool hfa_get_packet(struct cgpu_info *hashfast, struct hf_header *h)
@@ -901,6 +901,7 @@ static void hfa_parse_gwq_status(struct cgpu_info *hashfast, struct hashfast_inf
 			applog(LOG_ERR, "%s %d: Bad work sequence tail",
 			       hashfast->drv->name, hashfast->device_id);
 			hashfast->shutdown = true;
+			usb_nodev(hashfast);
 			break;
 		}
 		applog(LOG_DEBUG, "%s %d: Completing work on hash_sequence_tail %d",
