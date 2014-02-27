@@ -8400,8 +8400,6 @@ static void *hotplug_thread(void __maybe_unused *userdata)
 
 	RenameThread("Hotplug");
 
-	set_lowprio();
-
 	hotplug_mode = true;
 
 	cgsleep_ms(5000);
