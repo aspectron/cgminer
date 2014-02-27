@@ -1332,6 +1332,9 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITH_ARG("--hfa-name",
 		     opt_set_charp, NULL, &opt_hfa_name,
 		     "Set a unique name for a single hashfast device specified with --usb or the first device found"),
+	OPT_WITHOUT_ARG("--hfa-noshed",
+			opt_set_bool, &opt_hfa_noshed,
+			"Disable hashfast dynamic core disabling feature"),
 	OPT_WITH_ARG("--hfa-ntime-roll",
 		     opt_set_intval, NULL, &opt_hfa_ntime_roll,
 		     opt_hidden),
@@ -2407,7 +2410,7 @@ const char blanks[] = "                                        ";
 
 static void curses_print_devstatus(struct cgpu_info *cgpu, int devno, int count)
 {
-	static int dawidth = 1, drwidth = 1, hwwidth = 1, wuwidth = 1;
+	static int devno_width = 1, dawidth = 1, drwidth = 1, hwwidth = 1, wuwidth = 1;
 	char logline[256];
 	char displayed_hashes[16], displayed_rolling[16];
 	uint64_t dh64, dr64;
@@ -2438,7 +2441,9 @@ static void curses_print_devstatus(struct cgpu_info *cgpu, int devno, int count)
 	wu = cgpu->diff1 / dev_runtime * 60;
 
 	wmove(statuswin,devcursor + count, 0);
-	cg_wprintw(statuswin, " %03d: %s %*d: ", devno, cgpu->drv->name, dev_width, cgpu->device_id);
+	adj_width(devno, &devno_width);
+	cg_wprintw(statuswin, " %*d: %s %*d: ", devno_width, devno, cgpu->drv->name,
+		   dev_width, cgpu->device_id);
 	logline[0] = '\0';
 	cgpu->drv->get_statline_before(logline, sizeof(logline), cgpu);
 	devstatlen = strlen(logline);
@@ -6296,6 +6301,9 @@ static void pool_resus(struct pool *pool)
 		applog(LOG_INFO, "Pool %d %s alive", pool->pool_no, pool->rpc_url);
 }
 
+static bool work_filled;
+static bool work_emptied;
+
 /* If this is called non_blocking, it will return NULL for work so that must
  * be handled. */
 static struct work *hash_pop(bool blocking)
@@ -6305,6 +6313,13 @@ static struct work *hash_pop(bool blocking)
 
 	mutex_lock(stgd_lock);
 	if (!HASH_COUNT(staged_work)) {
+		/* Increase the queue if we reach zero and we know we can reach
+		 * the maximum we're asking for. */
+		if (work_filled) {
+			opt_queue++;
+			work_filled = false;
+		}
+		work_emptied = true;
 		if (!blocking)
 			goto out_unlock;
 		do {
@@ -7234,7 +7249,6 @@ void *miner_thread(void *userdata)
 	applog(LOG_DEBUG, "Waiting on sem in miner thread");
 	cgsem_wait(&mythr->sem);
 
-	set_highprio();
 	cgpu->last_device_valid_work = time(NULL);
 	drv->hash_work(mythr);
 out:
@@ -7474,6 +7488,9 @@ static void *longpoll_thread(void __maybe_unused *userdata)
 
 void reinit_device(struct cgpu_info *cgpu)
 {
+	if (cgpu->deven == DEV_DISABLED)
+		return;
+
 #ifdef USE_USBUTILS
 	/* Attempt a usb device reset if the device has gone sick */
 	if (cgpu->usbdev && cgpu->usbdev->handle)
@@ -7726,6 +7743,9 @@ static void *watchdog_thread(void __maybe_unused *userdata)
 			enum dev_enable *denable;
 			char dev_str[8];
 			int gpu;
+
+			if (!thr)
+				continue;
 
 			cgpu->drv->get_stats(cgpu);
 
@@ -8196,10 +8216,21 @@ static void noop_thread_enable(struct thr_info __maybe_unused *thr)
 static void noop_detect(bool __maybe_unused hotplug)
 {
 }
+
+static struct api_data *noop_get_api_stats(struct cgpu_info __maybe_unused *cgpu)
+{
+	return NULL;
+}
+
+static void noop_hash_work(struct thr_info __maybe_unused *thr)
+{
+}
+
 #define noop_flush_work noop_reinit_device
 #define noop_update_work noop_reinit_device
 #define noop_queue_full noop_get_stats
 #define noop_zero_stats noop_reinit_device
+#define noop_identify_device noop_reinit_device
 
 /* Fill missing driver drv functions with noops */
 void fill_device_drv(struct device_drv *drv)
@@ -8242,6 +8273,42 @@ void fill_device_drv(struct device_drv *drv)
 		drv->max_diff = 1;
 	if (!drv->working_diff)
 		drv->working_diff = 1;
+}
+
+void null_device_drv(struct device_drv *drv)
+{
+	drv->drv_detect = &noop_detect;
+	drv->reinit_device = &noop_reinit_device;
+	drv->get_statline_before = &blank_get_statline_before;
+	drv->get_statline = &noop_get_statline;
+	drv->get_api_stats = &noop_get_api_stats;
+	drv->get_stats = &noop_get_stats;
+	drv->identify_device = &noop_identify_device;
+	drv->set_device = NULL;
+
+	drv->thread_prepare = &noop_thread_prepare;
+	drv->can_limit_work = &noop_can_limit_work;
+	drv->thread_init = &noop_thread_init;
+	drv->prepare_work = &noop_prepare_work;
+
+	/* This should make the miner thread just exit */
+	drv->hash_work = &noop_hash_work;
+
+	drv->hw_error = &noop_hw_error;
+	drv->thread_shutdown = &noop_thread_shutdown;
+	drv->thread_enable = &noop_thread_enable;
+
+	drv->zero_stats = &noop_zero_stats;
+
+	drv->hash_work = &noop_hash_work;
+
+	drv->queue_full = &noop_queue_full;
+	drv->flush_work = &noop_flush_work;
+	drv->update_work = &noop_update_work;
+
+	drv->zero_stats = &noop_zero_stats;
+	drv->max_diff = 1;
+	drv->working_diff = 1;
 }
 
 void enable_device(struct cgpu_info *cgpu)
@@ -8366,8 +8433,11 @@ static void hotplug_process(void)
 			thr->cgpu = cgpu;
 			thr->device_thread = j;
 
-			if (cgpu->drv->thread_prepare && !cgpu->drv->thread_prepare(thr))
+			if (cgpu->drv->thread_prepare && !cgpu->drv->thread_prepare(thr)) {
+				null_device_drv(cgpu->drv);
+				cgpu->deven = DEV_DISABLED;
 				continue;
+			}
 
 			if (unlikely(thr_info_create(thr, NULL, miner_thread, thr)))
 				quit(1, "hotplug thread %d create failed", thr->id);
@@ -8897,6 +8967,8 @@ begin_bench:
 	if (total_control_threads != 8)
 		quit(1, "incorrect total_control_threads (%d) should be 8", total_control_threads);
 
+	set_highprio();
+
 	/* Once everything is set up, main() becomes the getwork scheduler */
 	while (42) {
 		int ts, max_staged = opt_queue;
@@ -8922,6 +8994,11 @@ begin_bench:
 
 		/* Wait until hash_pop tells us we need to create more work */
 		if (ts > max_staged) {
+			if (work_emptied) {
+				opt_queue++;
+				work_emptied = false;
+			}
+			work_filled = true;
 			pthread_cond_wait(&gws_cond, stgd_lock);
 			ts = __total_staged();
 		}
@@ -8931,6 +9008,11 @@ begin_bench:
 			/* Keeps slowly generating work even if it's not being
 			 * used to keep last_getwork incrementing and to see
 			 * if pools are still alive. */
+			if (work_emptied) {
+				opt_queue++;
+				work_emptied = false;
+			}
+			work_filled = true;
 			work = hash_pop(false);
 			if (work)
 				discard_work(work);

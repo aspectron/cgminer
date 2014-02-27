@@ -26,6 +26,7 @@ int opt_hfa_fan_default;
 int opt_hfa_fan_max;
 int opt_hfa_fan_min;
 int opt_hfa_fail_drop;
+bool opt_hfa_noshed;
 
 char *set_hfa_fan(char *arg);
 char *opt_hfa_name;
@@ -118,6 +119,8 @@ struct hashfast_info {
 	int core_ntime_roll;                        // Total core ntime roll amount
 	uint32_t serial_number;                     // db->serial_number if it exists
 	char op_name[36];
+	bool has_opname;
+	bool opname_valid;
 
 	pthread_mutex_t lock;
 	pthread_mutex_t rlock;
