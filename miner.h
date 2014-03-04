@@ -244,6 +244,7 @@ static inline int fsync (int fd)
 	DRIVER_ADD_COMMAND(drillbit) \
 	DRIVER_ADD_COMMAND(bab) \
 	DRIVER_ADD_COMMAND(minion) \
+	DRIVER_ADD_COMMAND(ants1) \
 	DRIVER_ADD_COMMAND(avalon2) \
 	DRIVER_ADD_COMMAND(avalon)
 
@@ -430,7 +431,7 @@ struct cgpu_info {
 	struct cg_usb_info usbinfo;
 	bool blacklisted;
 #endif
-#if defined(USE_AVALON) || defined(USE_AVALON2)
+#if defined(USE_AVALON) || defined(USE_AVALON2) || defined(USE_ANT_S1)
 	struct work **works;
 	int work_array;
 	int queued;
@@ -678,6 +679,7 @@ endian_flip128(void __maybe_unused *dest_p, const void __maybe_unused *src_p)
 #endif
 
 extern double cgpu_runtime(struct cgpu_info *cgpu);
+extern void __quit(int status, bool clean);
 extern void _quit(int status);
 
 /*
@@ -987,6 +989,10 @@ extern char *opt_bab_options;
 #endif
 #ifdef USE_BITMINE_A1
 extern char *opt_bitmine_a1_options;
+#endif
+#ifdef USE_ANT_S1
+extern char *opt_bitmain_options;
+extern bool opt_bitmain_hwerror;
 #endif
 #ifdef USE_USBUTILS
 extern char *opt_usb_select;
@@ -1308,7 +1314,7 @@ struct work {
 	int		gbt_txns;
 
 	unsigned int	work_block;
-	int		id;
+	uint32_t	id;
 	UT_hash_handle	hh;
 
 	double		work_difficulty;
@@ -1385,6 +1391,8 @@ extern struct work *get_queue_work(struct thr_info *thr, struct cgpu_info *cgpu,
 extern struct work *__find_work_bymidstate(struct work *que, char *midstate, size_t midstatelen, char *data, int offset, size_t datalen);
 extern struct work *find_queued_work_bymidstate(struct cgpu_info *cgpu, char *midstate, size_t midstatelen, char *data, int offset, size_t datalen);
 extern struct work *clone_queued_work_bymidstate(struct cgpu_info *cgpu, char *midstate, size_t midstatelen, char *data, int offset, size_t datalen);
+extern struct work *__find_work_byid(struct work *que, uint32_t id);
+extern struct work *find_queued_work_byid(struct cgpu_info *cgpu, uint32_t id);
 extern void __work_completed(struct cgpu_info *cgpu, struct work *work);
 extern int age_queued_work(struct cgpu_info *cgpu, double secs);
 extern void work_completed(struct cgpu_info *cgpu, struct work *work);
@@ -1431,6 +1439,7 @@ enum api_data_type {
 	API_STRING,
 	API_CONST,
 	API_UINT8,
+	API_INT16,
 	API_UINT16,
 	API_INT,
 	API_UINT,
@@ -1467,6 +1476,7 @@ extern struct api_data *api_add_escape(struct api_data *root, char *name, char *
 extern struct api_data *api_add_string(struct api_data *root, char *name, char *data, bool copy_data);
 extern struct api_data *api_add_const(struct api_data *root, char *name, const char *data, bool copy_data);
 extern struct api_data *api_add_uint8(struct api_data *root, char *name, uint8_t *data, bool copy_data);
+extern struct api_data *api_add_int16(struct api_data *root, char *name, uint16_t *data, bool copy_data);
 extern struct api_data *api_add_uint16(struct api_data *root, char *name, uint16_t *data, bool copy_data);
 extern struct api_data *api_add_int(struct api_data *root, char *name, int *data, bool copy_data);
 extern struct api_data *api_add_uint(struct api_data *root, char *name, unsigned int *data, bool copy_data);

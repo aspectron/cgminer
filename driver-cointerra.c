@@ -45,6 +45,19 @@ static bool cta_reset_init(char *buf)
 	return ((buf[CTA_MSG_TYPE] == CTA_RECV_RDONE) && ((buf[CTA_RESET_TYPE]&0x3) == CTA_RESET_INIT));
 }
 
+static char *mystrstr(char *haystack, int size, const char *needle)
+{
+	int loop = 0;
+
+	while (loop < (size-1)) {
+		if ((haystack[loop] == needle[0])&&
+		    (haystack[loop+1] == needle[1]))
+			return &haystack[loop];
+		loop++;
+	}
+	return NULL;
+}
+
 static bool cta_open(struct cgpu_info *cointerra)
 {
 	int err, amount, offset = 0;
@@ -101,7 +114,7 @@ static bool cta_open(struct cgpu_info *cointerra)
 		if (!amount)
 			continue;
 
-		msg = strstr(buf, cointerra_hdr);
+		msg = mystrstr(buf, amount, cointerra_hdr);
 		if (!msg) {
 			/* Keep the last byte in case it's the first byte of
 			 * the 2 byte header. */
@@ -356,7 +369,7 @@ static void cta_parse_recvmatch(struct thr_info *thr, struct cgpu_info *cointerr
 
 			mutex_lock(&info->lock);
 			if (ret)
-				info->share_hashes += (uint64_t)work->work_difficulty * 0x100000000ull;
+				info->share_hashes = (uint64_t)work->work_difficulty * 0x100000000ull;
 			info->hashes += nonce;
 			mutex_unlock(&info->lock);
 		} else {
@@ -553,6 +566,11 @@ static void cta_parse_debug(struct cointerra_info *info, char *buf)
 	info->autovoltage = u8_from_msg(buf, CTA_STAT_AUTOVOLTAGE);
 	info->current_ps_percent = u8_from_msg(buf, CTA_STAT_POWER_PERCENT);
 	info->power_used = hu16_from_msg(buf,CTA_STAT_POWER_USED);
+	info->power_voltage = hu16_from_msg(buf,CTA_STAT_VOLTAGE);
+	info->ipower_used = hu16_from_msg(buf,CTA_STAT_IPOWER_USED);
+	info->ipower_voltage = hu16_from_msg(buf,CTA_STAT_IVOLTAGE);
+	info->power_temps[0] = hu16_from_msg(buf,CTA_STAT_PS_TEMP1);
+	info->power_temps[1] = hu16_from_msg(buf,CTA_STAT_PS_TEMP2);
 
 	mutex_unlock(&info->lock);
 }
@@ -635,7 +653,7 @@ static void *cta_recv_thread(void *arg)
 		offset += amount;
 
 		while (offset >= CTA_MSG_SIZE) {
-			char *msg = strstr(buf, cointerra_hdr);
+			char *msg = mystrstr(buf, offset, cointerra_hdr);
 			int begin;
 
 			if (unlikely(!msg)) {
@@ -933,9 +951,10 @@ static int64_t cta_scanwork(struct thr_info *thr)
 	}
 
 	mutex_lock(&info->lock);
-	hashes = info->hashes;
-	info->tot_calc_hashes += hashes;
-	info->hashes = 0;
+	hashes = info->share_hashes;
+	info->tot_share_hashes += info->share_hashes;
+	info->tot_calc_hashes += info->hashes;
+	info->hashes = info->share_hashes = 0;
 	mutex_unlock(&info->lock);
 
 	if (unlikely(cointerra->usbinfo.nodev))
@@ -969,7 +988,7 @@ static void cta_zero_stats(struct cgpu_info *cointerra)
 
 	info->tot_calc_hashes = 0;
 	info->tot_reset_hashes = info->tot_hashes;
-	info->share_hashes = 0;
+	info->tot_share_hashes = 0;
 }
 
 static struct api_data *cta_api_stats(struct cgpu_info *cgpu)
@@ -1000,11 +1019,11 @@ static struct api_data *cta_api_stats(struct cgpu_info *cgpu)
 	/* Status readings */
 	for (i = 0; i < CTA_CORES; i++) {
 		sprintf(buf, "CoreTemp%d", i);
-		root = api_add_uint16(root, buf, &info->coretemp[i], false);
+		root = api_add_int16(root, buf, &info->coretemp[i], false);
 	}
-	root = api_add_uint16(root, "Ambient Low", &info->ambtemp_low, false);
-	root = api_add_uint16(root, "Ambient Avg", &info->ambtemp_avg, false);
-	root = api_add_uint16(root, "Ambient High", &info->ambtemp_high, false);
+	root = api_add_int16(root, "Ambient Low", &info->ambtemp_low, false);
+	root = api_add_int16(root, "Ambient Avg", &info->ambtemp_avg, false);
+	root = api_add_int16(root, "Ambient High", &info->ambtemp_high, false);
 	for (i = 0; i < CTA_PUMPS; i++) {
 		sprintf(buf, "PumpRPM%d", i);
 		root = api_add_uint16(root, buf, &info->pump_tachs[i], false);
@@ -1054,13 +1073,13 @@ static struct api_data *cta_api_stats(struct cgpu_info *cgpu)
 	root = api_add_uint64(root, "Hashrate", &ghs, true);
 	ghs = info->tot_hashes / dev_runtime;
 	root = api_add_uint64(root, "Raw hashrate", &ghs, true);
-	ghs = info->share_hashes / dev_runtime;
+	ghs = info->tot_share_hashes / dev_runtime;
 	root = api_add_uint64(root, "Share hashrate", &ghs, true);
 	root = api_add_uint64(root, "Total calc hashes", &info->tot_calc_hashes, false);
 	ghs = info->tot_hashes - info->tot_reset_hashes;
 	root = api_add_uint64(root, "Total hashes", &ghs, true);
 	root = api_add_uint64(root, "Total raw hashes", &info->tot_hashes, false);
-	root = api_add_uint64(root, "Total share hashes", &info->share_hashes, false);
+	root = api_add_uint64(root, "Total share hashes", &info->tot_share_hashes, false);
 	root = api_add_uint64(root, "Total flushed hashes", &info->tot_flushed_hashes, false);
 	val = cgpu->diff_accepted * 0x100000000ull;
 	root = api_add_uint64(root, "Accepted hashes", &val, true);
@@ -1090,6 +1109,12 @@ static struct api_data *cta_api_stats(struct cgpu_info *cgpu)
 	root = api_add_uint8(root,"AV",&info->autovoltage, false);
 	root = api_add_uint8(root,"Power Supply Percent",&info->current_ps_percent, false);
 	root = api_add_uint16(root,"Power Used",&info->power_used, false);
+	root = api_add_uint16(root,"IOUT",&info->power_used, false);
+	root = api_add_uint16(root,"VOUT",&info->power_voltage, false);
+	root = api_add_uint16(root,"IIN",&info->ipower_used, false);
+	root = api_add_uint16(root,"VIN",&info->ipower_voltage, false);
+	root = api_add_uint16(root,"PSTemp1",&info->power_temps[0], false);
+	root = api_add_uint16(root,"PSTemp2",&info->power_temps[1], false);
 
 	return root;
 }
@@ -1106,9 +1131,9 @@ static void cta_statline_before(char *buf, size_t bufsiz, struct cgpu_info *coin
 		if (info->corefreqs[i] > freq)
 			freq = info->corefreqs[i];
 	}
-	max_volt /= 100;
+	max_volt /= 1000;
 
-	tailsprintf(buf, bufsiz, "%3dMHz %3.1fC %2.1fV", freq, cointerra->temp, max_volt);
+	tailsprintf(buf, bufsiz, "%4dMHz %3.1fC %3.2fV", freq, cointerra->temp, max_volt);
 }
 
 struct device_drv cointerra_drv = {
