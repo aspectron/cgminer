@@ -17,6 +17,7 @@
 
 int opt_bxf_temp_target = BXF_TEMP_TARGET / 10;
 int opt_nf1_bits = 50;
+int opt_bxm_bits = 50;
 
 /* Wait longer 1/3 longer than it would take for a full nonce range */
 #define BF1WAIT 1600
@@ -511,13 +512,28 @@ static uint16_t calc_divisor(uint32_t system_clock, uint32_t freq)
 	return divisor;
 }
 
-static void bxm_close(struct cgpu_info *bitfury)
+static void bxm_shutdown(struct cgpu_info *bitfury, struct bitfury_info *info)
+{
+	int chip_n;
+
+	for (chip_n = 0; chip_n < 2; chip_n++) {
+		spi_clear_buf(info);
+		spi_add_break(info);
+		spi_add_fasync(info, chip_n);
+		spi_config_reg(info, 4, 0);
+		info->spi_txrx(bitfury, info);
+	}
+}
+
+static void bxm_close(struct cgpu_info *bitfury, struct bitfury_info *info)
 {
 	unsigned char bitmask = 0;
 	unsigned char mode = BITMODE_RESET;
 	unsigned short usb_val = bitmask;
 
-	//Need to do BITMODE_RESET before close per FTDI
+	bxm_shutdown(bitfury, info);
+
+	//Need to do BITMODE_RESET before usb close per FTDI
 	usb_val |= (mode << 8);
 	usb_transfer(bitfury, FTDI_TYPE_OUT, SIO_SET_BITMODE_REQUEST, usb_val, 1, C_BXM_SETBITMODE);
 }
@@ -658,12 +674,21 @@ static bool bxm_reset_bitfury(struct cgpu_info *bitfury)
 
 static bool bxm_reinit(struct cgpu_info *bitfury, struct bitfury_info *info)
 {
-	spi_clear_buf(info);
-	spi_add_break(info);
-	spi_set_freq(info);
-	spi_send_conf(info);
-	spi_send_init(info);
-	return info->spi_txrx(bitfury, info);
+	bool ret;
+	int i;
+
+	for (i = 0; i < 2; i++) {
+		spi_clear_buf(info);
+		spi_add_break(info);
+		spi_add_fasync(info, i);
+		spi_set_freq(info);
+		spi_send_conf(info);
+		spi_send_init(info);
+		ret = info->spi_txrx(bitfury, info);
+		if (!ret)
+			break;
+	}
+	return ret;
 }
 
 static bool bxm_detect_one(struct cgpu_info *bitfury, struct bitfury_info *info)
@@ -690,8 +715,7 @@ static bool bxm_detect_one(struct cgpu_info *bitfury, struct bitfury_info *info)
 	ret = info->spi_txrx(bitfury, info);
 	if (!ret)
 		goto out;
-	/* FIXME make configurable and use a faster default. */
-	info->osc6_bits = 50;
+	info->osc6_bits = opt_bxm_bits;
 	ret = bxm_reinit(bitfury, info);
 	if (!ret)
 		goto out;
@@ -707,7 +731,7 @@ static bool bxm_detect_one(struct cgpu_info *bitfury, struct bitfury_info *info)
 	info->total_nonces = 1;
 out:
 	if (!ret)
-		bxm_close(bitfury);
+		bxm_close(bitfury, info);
 	return ret;
 }
 
@@ -1180,29 +1204,40 @@ static int64_t bxf_scan(struct cgpu_info *bitfury, struct bitfury_info *info)
 	return ret;
 }
 
+static void bitfury_check_work(struct thr_info *thr, struct cgpu_info *bitfury,
+			       struct bitfury_info *info, int chip_n)
+{
+	if (!info->work[chip_n]) {
+		info->work[chip_n] = get_work(thr, thr->id);
+		if (unlikely(thr->work_restart)) {
+			free_work(info->work[chip_n]);
+			info->work[chip_n] = NULL;
+			return;
+		}
+		bitfury_work_to_payload(&info->payload[chip_n], info->work[chip_n]);
+	}
+
+	if (unlikely(bitfury->usbinfo.nodev))
+		return;
+
+	if (!libbitfury_sendHashData(thr, bitfury, info, chip_n))
+		usb_nodev(bitfury);
+
+	if (info->job_switched[chip_n]) {
+		if (likely(info->owork[chip_n]))
+			free_work(info->owork[chip_n]);
+		info->owork[chip_n] = info->work[chip_n];
+		info->work[chip_n] = NULL;
+	}
+
+}
+
 static int64_t nf1_scan(struct thr_info *thr, struct cgpu_info *bitfury,
 			struct bitfury_info *info)
 {
 	int64_t ret = 0;
 
-	if (!info->work) {
-		info->work = get_work(thr, thr->id);
-		if (unlikely(thr->work_restart)) {
-			free_work(info->work);
-			info->work = NULL;
-			return 0;
-		}
-		bitfury_work_to_payload(&info->payload, info->work);
-	}
-	if (!libbitfury_sendHashData(thr, bitfury, info))
-		return -1;
-
-	if (info->job_switched) {
-		if (likely(info->owork))
-			free_work(info->owork);
-		info->owork = info->work;
-		info->work = NULL;
-	}
+	bitfury_check_work(thr, bitfury, info, 0);
 
 	ret = bitfury_rate(info);
 
@@ -1219,25 +1254,10 @@ static int64_t bxm_scan(struct thr_info *thr, struct cgpu_info *bitfury,
 			struct bitfury_info *info)
 {
 	int64_t ret = 0;
+	int chip_n;
 
-	if (!info->work) {
-		info->work = get_work(thr, thr->id);
-		if (unlikely(thr->work_restart)) {
-			free_work(info->work);
-			info->work = NULL;
-			return 0;
-		}
-		bitfury_work_to_payload(&info->payload, info->work);
-	}
-	if (!libbitfury_sendHashData(thr, bitfury, info))
-		return -1;
-
-	if (info->job_switched) {
-		if (likely(info->owork))
-			free_work(info->owork);
-		info->owork = info->work;
-		info->work = NULL;
-	}
+	for (chip_n = 0; chip_n < 2; chip_n++)
+		bitfury_check_work(thr, bitfury, info, chip_n);
 
 	ret = bitfury_rate(info);
 
@@ -1479,7 +1499,7 @@ static void bitfury_shutdown(struct thr_info *thr)
 			nf1_close(bitfury);
 			break;
 		case IDENT_BXM:
-			bxm_close(bitfury);
+			bxm_close(bitfury, info);
 			break;
 		default:
 			break;

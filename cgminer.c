@@ -157,7 +157,8 @@ bool opt_loginput;
 bool opt_compact;
 const int opt_cutofftemp = 95;
 int opt_log_interval = 5;
-int opt_queue = 1;
+int opt_queue = 9999;
+static int max_queue = 1;
 int opt_scantime = -1;
 int opt_expiry = 120;
 static const bool opt_time = true;
@@ -1131,6 +1132,15 @@ static char *set_bitburner_fury_options(const char *arg)
 }
 #endif
 
+#ifdef USE_HASHFAST
+static char *set_hfa_options(const char *arg)
+{
+	opt_set_charp(arg, &opt_hfa_options);
+
+	return NULL;
+}
+#endif
+
 #ifdef USE_KLONDIKE
 static char *set_klondike_options(const char *arg)
 {
@@ -1239,6 +1249,17 @@ static struct opt_table opt_config_table[] = {
 		     set_int_0_to_100, opt_show_intval, &opt_avalon_temp,
 		     "Set avalon target temperature"),
 #endif
+#ifdef USE_AVALON2
+	OPT_WITH_ARG("--avalon2-freq",
+		     set_avalon2_freq, NULL, NULL,
+		     "Set frequency range for Avalon2, single value or range"),
+	OPT_WITH_ARG("--avalon2-fan",
+		     set_avalon2_fan, NULL, NULL,
+		     "Set Avalon2 target fan speed"),
+	OPT_WITH_ARG("--avalon2-voltage",
+		     set_avalon2_voltage, NULL, NULL,
+		     "Set Avalon2 core voltage, in millivolts"),
+#endif
 #ifdef USE_BAB
 	OPT_WITH_ARG("--bab-options",
 		     set_bab_options, NULL, NULL,
@@ -1309,6 +1330,9 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITH_ARG("--bxf-temp-target",
 		     set_int_0_to_200, opt_show_intval, &opt_bxf_temp_target,
 		     "Set target temperature for BXF devices"),
+	OPT_WITH_ARG("--bxm-bits",
+		     set_int_0_to_100, opt_show_intval, &opt_bxm_bits,
+		     "Set BXM bits for overclocking"),
 #endif
 #ifdef HAVE_CURSES
 	OPT_WITHOUT_ARG("--compact",
@@ -1368,6 +1392,9 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITH_ARG("--hfa-ntime-roll",
 		     opt_set_intval, NULL, &opt_hfa_ntime_roll,
 		     opt_hidden),
+	OPT_WITH_ARG("--hfa-options",
+		     set_hfa_options, NULL, NULL,
+		     "Set hashfast options name:clock (comma separated)"),
 	OPT_WITHOUT_ARG("--hfa-pll-bypass",
 			opt_set_bool, &opt_hfa_pll_bypass,
 			opt_hidden),
@@ -1398,17 +1425,6 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITH_ARG("--kernel-path|-K",
 		     opt_set_charp, opt_show_charp, &opt_kernel_path,
 	             "Specify a path to where bitstream files are"),
-#endif
-#ifdef USE_AVALON2
-	OPT_WITH_ARG("--avalon2-freq",
-		     set_avalon2_freq, NULL, NULL,
-		     "Set frequency range for Avalon2, single value or range"),
-	OPT_WITH_ARG("--avalon2-fan",
-		     set_avalon2_fan, NULL, NULL,
-		     "Set Avalon2 target fan speed"),
-	OPT_WITH_ARG("--avalon2-voltage",
-		     set_avalon2_voltage, NULL, NULL,
-		     "Set Avalon2 core voltage, in millivolts"),
 #endif
 #ifdef USE_KLONDIKE
 	OPT_WITH_ARG("--klondike-options",
@@ -1456,7 +1472,7 @@ static struct opt_table opt_config_table[] = {
 			"Verbose dump of protocol-level activities"),
 	OPT_WITH_ARG("--queue|-Q",
 		     set_int_0_to_9999, opt_show_intval, &opt_queue,
-		     "Minimum number of work items to have queued (0+)"),
+		     "Maximum number of work items to have queued"),
 	OPT_WITHOUT_ARG("--quiet|-q",
 			opt_set_bool, &opt_quiet,
 			"Disable logging output, display status and errors"),
@@ -3714,7 +3730,9 @@ static inline bool can_roll(struct work *work)
 		work->rolls < 7000 && !stale_work(work, false));
 }
 
-static void roll_work(struct work *work)
+static char *offset_ntime(const char *ntime, int noffset);
+
+void roll_work(struct work *work)
 {
 	uint32_t *work_ntime;
 	uint32_t ntime;
@@ -3727,6 +3745,9 @@ static void roll_work(struct work *work)
 	work->rolls++;
 	work->nonce = 0;
 	applog(LOG_DEBUG, "Successfully rolled work");
+	/* Change the ntime field if this is stratum work */
+	if (work->ntime)
+		work->ntime = offset_ntime(work->ntime, 1);
 
 	/* This is now a different work item so it needs a different ID for the
 	 * hashtable */
@@ -3776,7 +3797,7 @@ static void *submit_work_thread(void *userdata)
 	return NULL;
 }
 
-static struct work *make_clone(struct work *work)
+struct work *make_clone(struct work *work)
 {
 	struct work *work_clone = copy_work(work);
 
@@ -4845,6 +4866,8 @@ void zero_stats(void)
 	for (i = 0; i < total_devices; ++i) {
 		struct cgpu_info *cgpu = get_devices(i);
 
+		memcpy(&cgpu->dev_start_tv, &total_tv_start, sizeof(struct timeval));
+
 		mutex_lock(&hash_lock);
 		cgpu->total_mhashes = 0;
 		cgpu->accepted = 0;
@@ -5192,6 +5215,8 @@ retry:
 			goto retry;
 		}
 		opt_queue = selected;
+		if (opt_queue < max_queue)
+			max_queue = opt_queue;
 		goto retry;
 	} else if  (!strncasecmp(&input, "s", 1)) {
 		selected = curses_int("Set scantime in seconds");
@@ -6348,8 +6373,8 @@ static struct work *hash_pop(bool blocking)
 	if (!HASH_COUNT(staged_work)) {
 		/* Increase the queue if we reach zero and we know we can reach
 		 * the maximum we're asking for. */
-		if (work_filled) {
-			opt_queue++;
+		if (work_filled && max_queue < opt_queue) {
+			max_queue++;
 			work_filled = false;
 		}
 		work_emptied = true;
@@ -9060,7 +9085,7 @@ begin_bench:
 
 	/* Once everything is set up, main() becomes the getwork scheduler */
 	while (42) {
-		int ts, max_staged = opt_queue;
+		int ts, max_staged = max_queue;
 		struct pool *pool, *cp;
 		bool lagging = false;
 		struct work *work;
@@ -9083,8 +9108,8 @@ begin_bench:
 
 		/* Wait until hash_pop tells us we need to create more work */
 		if (ts > max_staged) {
-			if (work_emptied) {
-				opt_queue++;
+			if (work_emptied && max_queue < opt_queue) {
+				max_queue++;
 				work_emptied = false;
 			}
 			work_filled = true;
@@ -9097,8 +9122,8 @@ begin_bench:
 			/* Keeps slowly generating work even if it's not being
 			 * used to keep last_getwork incrementing and to see
 			 * if pools are still alive. */
-			if (work_emptied) {
-				opt_queue++;
+			if (work_emptied && max_queue < opt_queue) {
+				max_queue++;
 				work_emptied = false;
 			}
 			work_filled = true;
@@ -9114,8 +9139,8 @@ begin_bench:
 			applog(LOG_WARNING, "Pool %d not providing work fast enough", cp->pool_no);
 			cp->getfail_occasions++;
 			total_go++;
-			if (!pool_localgen(cp))
-				applog(LOG_INFO, "Increasing queue to %d", ++opt_queue);
+			if (!pool_localgen(cp) && max_queue < opt_queue)
+				applog(LOG_INFO, "Increasing queue to %d", ++max_queue);
 		}
 		pool = select_pool(lagging);
 retry:

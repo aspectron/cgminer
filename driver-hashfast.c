@@ -31,6 +31,7 @@ int opt_hfa_fail_drop = 10;
 bool opt_hfa_noshed;
 
 char *opt_hfa_name;
+char *opt_hfa_options;
 
 ////////////////////////////////////////////////////////////////////////////////
 // Support for the CRC's used in header (CRC-8) and packet body (CRC-32)
@@ -482,10 +483,12 @@ tryagain:
 		goto out;
 	}
 	db = &info->usb_init_base;
-	applog(LOG_INFO, "%s %d:      firmware_rev:    %d.%d", hashfast->drv->name, hashfast->device_id,
-	       (db->firmware_rev >> 8) & 0xff, db->firmware_rev & 0xff);
-	applog(LOG_INFO, "%s %d:      hardware_rev:    %d.%d", hashfast->drv->name, hashfast->device_id,
-	       (db->hardware_rev >> 8) & 0xff, db->hardware_rev & 0xff);
+	info->firmware_version = ((db->firmware_rev >> 8) & 0xff) + (double)(db->firmware_rev & 0xff) / 10.0;
+	info->hardware_version = ((db->hardware_rev >> 8) & 0xff) + (double)(db->hardware_rev & 0xff) / 10.0;
+	applog(LOG_INFO, "%s %d:      firmware_rev:    %.1f", hashfast->drv->name, hashfast->device_id,
+	       info->firmware_version);
+	applog(LOG_INFO, "%s %d:      hardware_rev:    %.1f", hashfast->drv->name, hashfast->device_id,
+	       info->hardware_version);
 	applog(LOG_INFO, "%s %d:      serial number:   %08x", hashfast->drv->name, hashfast->device_id,
 	       db->serial_number);
 	applog(LOG_INFO, "%s %d:      hash clockrate:  %d Mhz", hashfast->drv->name, hashfast->device_id,
@@ -625,6 +628,60 @@ static void hfa_set_clock(struct cgpu_info *hashfast, struct hashfast_info *info
 		info->die_data[i].hash_clock = info->base_clock;
 }
 
+/* Look for an op name match and apply any options to its first attempted
+ * init sequence. This function allows any arbitrary number of extra parameters
+ * to be added in the future. */
+static void hfa_check_options(struct hashfast_info *info)
+{
+	char *p, *options, *found = NULL;
+	int maxlen, option = 0;
+
+	if (!opt_hfa_options)
+		return;
+
+	if (!info->op_name)
+		return;
+
+	maxlen = strlen(info->op_name);
+
+	options = strdup(opt_hfa_options);
+	for (p = strtok(options, ","); p; p = strtok(NULL, ",")) {
+		int cmplen = strlen(p);
+
+		if (maxlen < cmplen)
+			cmplen = maxlen;
+		if (cmplen < maxlen)
+			continue;
+		if (!strncmp(info->op_name, p, cmplen)) {
+			found = strdup(p);
+			break;
+		}
+	}
+	free(options);
+	if (!found)
+		return;
+
+	for (p = strtok(found, ":"); p; p = strtok(NULL, ":")) {
+		long lval;
+
+		/* Parse each option in order, leaving room to add more */
+		switch(option++) {
+			default:
+				break;
+			case 1:
+				lval = strtol(p, NULL, 10);
+				if (lval < HFA_CLOCK_MIN || lval > HFA_CLOCK_MAX) {
+					applog(LOG_ERR, "Invalid clock speed %ld set with hashfast option for %s",
+					       lval, info->op_name);
+					break;
+				}
+				info->hash_clock_rate = lval;
+				break;
+		}
+	}
+	free(found);
+}
+
 static bool hfa_detect_common(struct cgpu_info *hashfast)
 {
 	struct hashfast_info *info;
@@ -641,16 +698,24 @@ static bool hfa_detect_common(struct cgpu_info *hashfast)
 
 	/* Try sending and receiving an OP_NAME */
 	ret = hfa_send_frame(hashfast, HF_USB_CMD(OP_NAME), 0, (uint8_t *)NULL, 0);
+	if (hashfast->usbinfo.nodev) {
+		ret = false;
+		goto out;
+	}
 	if (!ret) {
 		applog(LOG_WARNING, "%s %d: Failed to send OP_NAME!", hashfast->drv->name,
 		       hashfast->device_id);
 		goto out;
 	}
 	ret = hfa_get_header(hashfast, h, &hcrc);
+	if (hashfast->usbinfo.nodev) {
+		ret = false;
+		goto out;
+	}
 	if (!ret) {
 		/* We should receive a valid header even if OP_NAME isn't
 		 * supported by the firmware. */
-		applog(LOG_NOTICE, "%s %d: Firmware upgrade required to support module Naming.",
+		applog(LOG_NOTICE, "%s %d: No response to name query - failed init or firmware upgrade required.",
 			hashfast->drv->name, hashfast->device_id);
 		ret = true;
 	} else {
@@ -690,6 +755,7 @@ static bool hfa_detect_common(struct cgpu_info *hashfast)
 		} else {
 			applog(LOG_NOTICE, "%s: Found device with name %s", hashfast->drv->name,
 			       info->op_name);
+			hfa_check_options(info);
 		}
 	}
 
@@ -1348,7 +1414,7 @@ static void hfa_increase_clock(struct cgpu_info *hashfast, struct hashfast_info 
 			if (info->die_data[i].hash_clock < low_clock)
 				low_clock = info->die_data[i].hash_clock;
 		}
-		if (low_clock + HFA_CLOCK_MAXDIFF > high_clock) {
+		if (info->firmware_version < 0.5 && low_clock + HFA_CLOCK_MAXDIFF > high_clock) {
 			/* We can increase all clocks again */
 			for (i = 0; i < info->asic_count; i++) {
 				if (i == die) /* We've already added to this die */
@@ -1383,7 +1449,7 @@ static void hfa_decrease_clock(struct cgpu_info *hashfast, struct hashfast_info 
 	if (hdd->hash_clock - decrease < HFA_CLOCK_MIN)
 		decrease = hdd->hash_clock - HFA_CLOCK_MIN;
 	hdata = (WR_MHZ_DECREASE << 12) | decrease;
-	if (high_clock >= hdd->hash_clock + HFA_CLOCK_MAXDIFF) {
+	if (info->firmware_version < 0.5 && high_clock >= hdd->hash_clock + HFA_CLOCK_MAXDIFF) {
 		/* We can't have huge differences in clocks as it will lead to
 		 * starvation of the faster cores so we have no choice but to
 		 * slow down all dies to tame this one. */
@@ -1518,6 +1584,8 @@ dies_only:
 
 static void hfa_running_shutdown(struct cgpu_info *hashfast, struct hashfast_info *info)
 {
+	int iruntime = cgpu_runtime(hashfast);
+
 	info->resets++;
 
 	/* If the device has already disapperaed, don't drop the clock in case
@@ -1525,7 +1593,10 @@ static void hfa_running_shutdown(struct cgpu_info *hashfast, struct hashfast_inf
 	if (hashfast->usbinfo.nodev)
 		return;
 
-	if (info->hash_clock_rate > HFA_CLOCK_DEFAULT && opt_hfa_fail_drop) {
+	/* Only decrease the clock speed if the device has run at this speed
+	 * for less than an hour before failing, otherwise the hashrate gains
+	 * are worth the occasional restart which takes at most a minute. */
+	if (iruntime < 3600 && info->hash_clock_rate > HFA_CLOCK_DEFAULT && opt_hfa_fail_drop) {
 		info->hash_clock_rate -= opt_hfa_fail_drop;
 		if (info->hash_clock_rate < HFA_CLOCK_DEFAULT)
 			info->hash_clock_rate = HFA_CLOCK_DEFAULT;
@@ -1556,6 +1627,7 @@ static int64_t hfa_scanwork(struct thr_info *thr)
 {
 	struct cgpu_info *hashfast = thr->cgpu;
 	struct hashfast_info *info = hashfast->device_data;
+	struct work *base_work = NULL;
 	int jobs, ret, cycles = 0;
 	double fail_time;
 	int64_t hashes;
@@ -1618,7 +1690,20 @@ restart:
 		uint32_t *p;
 
 		/* This is a blocking function if there's no work */
-		work = get_work(thr, thr->id);
+		if (!base_work)
+			base_work = get_work(thr, thr->id);
+
+		/* Older firmwares actually had ntime rolling disabled so we
+		 * can roll the work ourselves here to minimise the amount of
+		 * work we need to generate. */
+		if (info->firmware_version < 0.5 && base_work->drv_rolllimit > jobs) {
+			base_work->drv_rolllimit--;
+			roll_work(base_work);
+			work = make_clone(base_work);
+		} else {
+			work = base_work;
+			base_work = NULL;
+		}
 
 		/* Assemble the data frame and send the OP_HASH packet */
 		memcpy(op_hash_data.midstate, work->midstate, sizeof(op_hash_data.midstate));
@@ -1640,6 +1725,9 @@ restart:
 			sequence = 0;
 		ret = hfa_send_frame(hashfast, OP_HASH, sequence, (uint8_t *)&op_hash_data, sizeof(op_hash_data));
 		if (unlikely(!ret)) {
+			free_work(work);
+			if (base_work)
+				free_work(base_work);
 			hfa_running_shutdown(hashfast, info);
 			return -1;
 		}
@@ -1653,6 +1741,9 @@ restart:
 		       hashfast->drv->name, hashfast->device_id, info->hash_sequence_head,
 		       op_hash_data.search_difficulty, work->work_difficulty);
 	}
+
+	if (base_work)
+		free_work(base_work);
 
 	/* Only count 2/3 of the hashes to smooth out the hashrate for cycles
 	 * that have no hashes added. */
@@ -1681,11 +1772,9 @@ static struct api_data *hfa_api_stats(struct cgpu_info *cgpu)
 	root = api_add_int(root, "asic count", &info->asic_count, false);
 	root = api_add_int(root, "core count", &info->core_count, false);
 
+	root = api_add_double(root, "firmware rev", &info->firmware_version, false);
+	root = api_add_double(root, "hardware rev", &info->hardware_version, false);
 	db = &info->usb_init_base;
-	sprintf(buf, "%d.%d", (db->firmware_rev >> 8) & 0xff, db->firmware_rev & 0xff);
-	root = api_add_string(root, "firmware rev", buf, true);
-	sprintf(buf, "%d.%d", (db->hardware_rev >> 8) & 0xff, db->hardware_rev & 0xff);
-	root = api_add_string(root, "hardware rev", buf, true);
 	root = api_add_hex32(root, "serial number", &db->serial_number, true);
 	varint = db->hash_clockrate;
 	root = api_add_int(root, "base clockrate", &varint, true);

@@ -25,6 +25,7 @@
 
 extern int opt_bxf_temp_target;
 extern int opt_nf1_bits;
+extern int opt_bxm_bits;
 
 #define NF1_PIN_LED 0
 #define NF1_PIN_SCK_OVR 5
@@ -96,14 +97,12 @@ struct bitfury_info {
 	char spibuf[SPIBUF_SIZE];
 	unsigned int spibufsz;
 	int osc6_bits;
-	struct bitfury_payload payload;
-	struct bitfury_payload opayload;
-	unsigned newbuf[17];
-	unsigned oldbuf[17];
-	bool job_switched;
-	bool second_run;
-	struct work *work;
-	struct work *owork;
+	struct bitfury_payload payload[2];
+	unsigned oldbuf[17 * 2];
+	bool job_switched[2];
+	bool second_run[2];
+	struct work *work[2];
+	struct work *owork[2];
 
 	bool (*spi_txrx)(struct cgpu_info *, struct bitfury_info *info);
 };
