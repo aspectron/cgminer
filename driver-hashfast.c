@@ -523,6 +523,18 @@ tryagain:
 			(db->operation_status < sizeof(hf_usb_init_errors)/sizeof(hf_usb_init_errors[0])) ?
 			hf_usb_init_errors[db->operation_status] : "Unknown error code");
 		ret = false;
+		switch (db->operation_status) {
+			case E_CORE_POWER_FAULT:
+				for (i = 0; i < 4; i++) {
+					if (((db->extra_status_1 >> i) & 0x11) == 0x1) {
+						applog(LOG_ERR, "%s %d: OP_USB_INIT: Quadrant %d (of 4) regulator failure",
+						       hashfast->drv->name, hashfast->device_id, i + 1);
+					}
+				}
+				break;
+			default:
+				break;
+		}
 		goto out;
 	}
 
@@ -1696,7 +1708,7 @@ restart:
 		/* Older firmwares actually had ntime rolling disabled so we
 		 * can roll the work ourselves here to minimise the amount of
 		 * work we need to generate. */
-		if (info->firmware_version < 0.5 && base_work->drv_rolllimit > jobs) {
+		if (info->firmware_version < 0.6 && base_work->drv_rolllimit > jobs) {
 			base_work->drv_rolllimit--;
 			roll_work(base_work);
 			work = make_clone(base_work);

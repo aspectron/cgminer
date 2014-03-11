@@ -852,11 +852,11 @@ static void setup_url(struct pool *pool, char *arg)
 	    strncmp(arg, "https://", 8)) {
 		char *httpinput;
 
-		httpinput = malloc(255);
+		httpinput = malloc(256);
 		if (!httpinput)
 			quit(1, "Failed to malloc httpinput");
-		strcpy(httpinput, "http://");
-		strncat(httpinput, arg, 248);
+		strcpy(httpinput, "stratum+tcp://");
+		strncat(httpinput, arg, 242);
 		pool->rpc_url = httpinput;
 	}
 }
@@ -3730,7 +3730,17 @@ static inline bool can_roll(struct work *work)
 		work->rolls < 7000 && !stale_work(work, false));
 }
 
-static char *offset_ntime(const char *ntime, int noffset);
+/* Adjust an existing char ntime field with a relative noffset */
+static void modify_ntime(char *ntime, int noffset)
+{
+	unsigned char bin[4];
+	uint32_t h32, *be32 = (uint32_t *)bin;
+
+	hex2bin(bin, ntime, 4);
+	h32 = be32toh(*be32) + noffset;
+	*be32 = htobe32(h32);
+	__bin2hex(ntime, bin, 4);
+}
 
 void roll_work(struct work *work)
 {
@@ -3747,7 +3757,7 @@ void roll_work(struct work *work)
 	applog(LOG_DEBUG, "Successfully rolled work");
 	/* Change the ntime field if this is stratum work */
 	if (work->ntime)
-		work->ntime = offset_ntime(work->ntime, 1);
+		modify_ntime(work->ntime, 1);
 
 	/* This is now a different work item so it needs a different ID for the
 	 * hashtable */
