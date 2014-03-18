@@ -11,7 +11,7 @@ global $checklastshare, $poolinputs, $hidefields;
 global $ignorerefresh, $changerefresh, $autorefresh;
 global $allowcustompages, $customsummarypages;
 global $miner_font_family, $miner_font_size;
-global $bad_font_family, $bad_font_size;
+global $bad_font_family, $bad_font_size, $add_css_names;
 global $colouroverride, $placebuttons, $userlist;
 #
 $doctype = "<!DOCTYPE html>\n";
@@ -208,6 +208,12 @@ $miner_font_size = '13pt';
 $bad_font_family = '"Times New Roman", Times, serif';
 $bad_font_size = '18pt';
 #
+# List of css names to add to the css style object
+#	e.g. array('td.cool' => false);
+# true/false to not include the default $miner_font
+# The css name/value pairs must be defined in $colouroverride below
+$add_css_names = array();
+#
 # Edit this or redefine it in myminer.php to change the colour scheme
 # See $colourtable below for the list of names
 $colouroverride = array();
@@ -314,7 +320,7 @@ function php_pr($cmd)
 function htmlhead($mcerr, $checkapi, $rig, $pg = null, $noscript = false)
 {
  global $doctype, $title, $miner_font_family, $miner_font_size;
- global $bad_font_family, $bad_font_size;
+ global $bad_font_family, $bad_font_size, $add_css_names;
  global $error, $readonly, $poolinputs, $here;
  global $ignorerefresh, $autorefresh;
 
@@ -358,8 +364,16 @@ td.sta { $miner_font ".getcss('td.sta')."}
 td.tot { $miner_font ".getcss('td.tot')."}
 td.lst { $miner_font ".getcss('td.lst')."}
 td.hi { $miner_font ".getcss('td.hi')."}
-td.lo { $miner_font ".getcss('td.lo')."}
-</style>
+td.lo { $miner_font ".getcss('td.lo')."}\n";
+ if (isset($add_css_names))
+	foreach ($add_css_names as $css_name => $no_miner_font)
+	{
+		echo "$css_name { ";
+		if ($no_miner_font !== true)
+			echo "$miner_font ";
+		echo getcss("$css_name")."}\n";
+	}
+ echo "</style>
 </head><body".getdom('body').">\n";
 if ($noscript === false)
 {
@@ -796,38 +810,53 @@ function endzero($num)
  return $rep;
 }
 #
-function fmt($section, $name, $value, $when, $alldata)
+function fmt($section, $name, $value, $when, $alldata, $cf = NULL)
 {
  global $dfmt, $rownum;
 
  if ($alldata == null)
 	$alldata = array();
 
- $errorclass = ' class=err';
- $warnclass = ' class=warn';
- $lstclass = ' class=lst';
- $hiclass = ' class=hi';
- $loclass = ' class=lo';
- $c2class = ' class=two';
- $totclass = ' class=tot';
+ $errorclass = 'err';
+ $warnclass = 'warn';
+ $lstclass = 'lst';
+ $hiclass = 'hi';
+ $loclass = 'lo';
+ $c2class = 'two';
+ $totclass = 'tot';
  $b = '&nbsp;';
 
- $ret = $value;
  $class = '';
 
  $nams = explode('.', $name);
  if (count($nams) > 1)
 	$name = $nams[count($nams)-1];
 
+ $done = false;
  if ($value === null)
+ {
 	$ret = $b;
+	$done = true;
+ }
  else
+	if ($cf != NULL and function_exists($cf))
+	{
+		list($ret, $class) = $cf($section, $name, $value, $when, $alldata,
+					   $warnclass, $errorclass, $hiclass, $loclass, $totclass);
+		if ($ret !== '')
+			$done = true;
+	}
+
+ if ($done === false)
+ {
+	$ret = $value;
 	switch ($section.'.'.$name)
 	{
 	case 'GPU.Last Share Time':
 	case 'PGA.Last Share Time':
 	case 'ASC.Last Share Time':
 	case 'DEVS.Last Share Time':
+	case 'EDEVS.Last Share Time':
 		if ($value == 0
 		||  (isset($alldata['Last Share Pool']) && $alldata['Last Share Pool'] == -1))
 		{
@@ -844,6 +873,7 @@ function fmt($section, $name, $value, $when, $alldata)
 	case 'PGA.Last Valid Work':
 	case 'ASC.Last Valid Work':
 	case 'DEVS.Last Valid Work':
+	case 'EDEVS.Last Valid Work':
 		if ($value == 0)
 			$ret = 'Never';
 		else
@@ -859,6 +889,7 @@ function fmt($section, $name, $value, $when, $alldata)
 	case 'PGA.Last Share Pool':
 	case 'ASC.Last Share Pool':
 	case 'DEVS.Last Share Pool':
+	case 'EDEVS.Last Share Pool':
 		if ($value == -1)
 		{
 			$ret = 'None';
@@ -867,6 +898,11 @@ function fmt($section, $name, $value, $when, $alldata)
 		break;
 	case 'SUMMARY.Elapsed':
 	case 'STATS.Elapsed':
+	case 'ESTATS.Elapsed':
+	case 'PGA.Device Elapsed':
+	case 'ASC.Device Elapsed':
+	case 'DEVS.Device Elapsed':
+	case 'EDEVS.Device Elapsed':
 		$s = $value % 60;
 		$value -= $s;
 		$value /= 60;
@@ -924,6 +960,7 @@ function fmt($section, $name, $value, $when, $alldata)
 	case 'PGA.Utility':
 	case 'ASC.Utility':
 	case 'DEVS.Utility':
+	case 'EDEVS.Utility':
 	case 'SUMMARY.Utility':
 	case 'total.Utility':
 		$ret = $value.'/m';
@@ -960,6 +997,7 @@ function fmt($section, $name, $value, $when, $alldata)
 	case 'PGA.Temperature':
 	case 'ASC.Temperature':
 	case 'DEVS.Temperature':
+	case 'EDEVS.Temperature':
 		$ret = $value.'&deg;C';
 		if (!isset($alldata['GPU']))
 		{
@@ -969,17 +1007,22 @@ function fmt($section, $name, $value, $when, $alldata)
 		}
 	case 'GPU.GPU Clock':
 	case 'DEVS.GPU Clock':
+	case 'EDEVS.GPU Clock':
 	case 'GPU.Memory Clock':
 	case 'DEVS.Memory Clock':
+	case 'EDEVS.Memory Clock':
 	case 'GPU.GPU Voltage':
 	case 'DEVS.GPU Voltage':
+	case 'EDEVS.GPU Voltage':
 	case 'GPU.GPU Activity':
 	case 'DEVS.GPU Activity':
+	case 'EDEVS.GPU Activity':
 		if ($value == 0)
 			$class = $warnclass;
 		break;
 	case 'GPU.Fan Percent':
 	case 'DEVS.Fan Percent':
+	case 'EDEVS.Fan Percent':
 		if ($value == 0)
 			$class = $warnclass;
 		else
@@ -993,6 +1036,7 @@ function fmt($section, $name, $value, $when, $alldata)
 		break;
 	case 'GPU.Fan Speed':
 	case 'DEVS.Fan Speed':
+	case 'EDEVS.Fan Speed':
 		if ($value == 0)
 			$class = $warnclass;
 		else
@@ -1010,6 +1054,7 @@ function fmt($section, $name, $value, $when, $alldata)
 	case 'PGA.MHS av':
 	case 'ASC.MHS av':
 	case 'DEVS.MHS av':
+	case 'EDEVS.MHS av':
 	case 'SUMMARY.MHS av':
 	case 'total.MHS av':
 		$parts = explode('.', $value, 2);
@@ -1048,6 +1093,7 @@ function fmt($section, $name, $value, $when, $alldata)
 	case 'PGA.Total MH':
 	case 'ASC.Total MH':
 	case 'DEVS.Total MH':
+	case 'EDEVS.Total MH':
 	case 'SUMMARY.Total MH':
 	case 'total.Total MH':
 	case 'SUMMARY.Getworks':
@@ -1057,6 +1103,7 @@ function fmt($section, $name, $value, $when, $alldata)
 	case 'PGA.Accepted':
 	case 'ASC.Accepted':
 	case 'DEVS.Accepted':
+	case 'EDEVS.Accepted':
 	case 'SUMMARY.Accepted':
 	case 'POOL.Accepted':
 	case 'total.Accepted':
@@ -1064,6 +1111,7 @@ function fmt($section, $name, $value, $when, $alldata)
 	case 'PGA.Rejected':
 	case 'ASC.Rejected':
 	case 'DEVS.Rejected':
+	case 'EDEVS.Rejected':
 	case 'SUMMARY.Rejected':
 	case 'POOL.Rejected':
 	case 'total.Rejected':
@@ -1084,6 +1132,12 @@ function fmt($section, $name, $value, $when, $alldata)
 	case 'STATS.Times Recv':
 	case 'STATS.Bytes Recv':
 	case 'STATS.Net Bytes Recv':
+	case 'ESTATS.Times Sent':
+	case 'ESTATS.Bytes Sent':
+	case 'ESTATS.Net Bytes Sent':
+	case 'ESTATS.Times Recv':
+	case 'ESTATS.Bytes Recv':
+	case 'ESTATS.Net Bytes Recv':
 	case 'total.Times Sent':
 	case 'total.Bytes Sent':
 	case 'total.Net Bytes Sent':
@@ -1107,6 +1161,16 @@ function fmt($section, $name, $value, $when, $alldata)
 	case 'STATS.Min Diff':
 	case 'STATS.Max Diff':
 	case 'STATS.Work Diff':
+	case 'ESTATS.Hs':
+	case 'ESTATS.W':
+	case 'ESTATS.history_time':
+	case 'ESTATS.Pool Wait':
+	case 'ESTATS.Pool Max':
+	case 'ESTATS.Pool Min':
+	case 'ESTATS.Pool Av':
+	case 'ESTATS.Min Diff':
+	case 'ESTATS.Max Diff':
+	case 'ESTATS.Work Diff':
 		$parts = explode('.', $value, 2);
 		if (count($parts) == 1)
 			$dec = '';
@@ -1118,6 +1182,7 @@ function fmt($section, $name, $value, $when, $alldata)
 	case 'PGA.Status':
 	case 'ASC.Status':
 	case 'DEVS.Status':
+	case 'EDEVS.Status':
 	case 'POOL.Status':
 		if ($value != 'Alive')
 			$class = $errorclass;
@@ -1127,6 +1192,7 @@ function fmt($section, $name, $value, $when, $alldata)
 	case 'ASC.Enabled':
 	case 'ASC.Enabled':
 	case 'DEVS.Enabled':
+	case 'EDEVS.Enabled':
 		if ($value != 'Y')
 			$class = $warnclass;
 		break;
@@ -1144,6 +1210,7 @@ function fmt($section, $name, $value, $when, $alldata)
 	case 'PGA.Difficulty Accepted':
 	case 'ASC.Difficulty Accepted':
 	case 'DEVS.Difficulty Accepted':
+	case 'EDEVS.Difficulty Accepted':
 	case 'POOL.Difficulty Accepted':
 	case 'total.Difficulty Accepted':
 	case 'SUMMARY.Difficulty Rejected':
@@ -1151,6 +1218,7 @@ function fmt($section, $name, $value, $when, $alldata)
 	case 'PGA.Difficulty Rejected':
 	case 'ASC.Difficulty Rejected':
 	case 'DEVS.Difficulty Rejected':
+	case 'EDEVS.Difficulty Rejected':
 	case 'POOL.Difficulty Rejected':
 	case 'total.Difficulty Rejected':
 	case 'SUMMARY.Difficulty Stale':
@@ -1160,12 +1228,15 @@ function fmt($section, $name, $value, $when, $alldata)
 	case 'PGA.Last Share Difficulty':
 	case 'ASC.Last Share Difficulty':
 	case 'DEVS.Last Share Difficulty':
+	case 'EDEVS.Last Share Difficulty':
 	case 'POOL.Last Share Difficulty':
 		if ($value != '')
 			$ret = number_format((float)$value, 2);
 		break;
 	case 'DEVS.Device Hardware%':
 	case 'DEVS.Device Rejected%':
+	case 'EDEVS.Device Hardware%':
+	case 'EDEVS.Device Rejected%':
 	case 'ASC.Device Hardware%':
 	case 'ASC.Device Rejected%':
 	case 'PGA.Device Hardware%':
@@ -1186,6 +1257,7 @@ function fmt($section, $name, $value, $when, $alldata)
 			$ret = number_format((float)$value);
 		break;
 	}
+ }
 
  if ($section == 'NOTIFY' && substr($name, 0, 1) == '*' && $value != '0')
 	$class = $errorclass;
@@ -1201,6 +1273,9 @@ function fmt($section, $name, $value, $when, $alldata)
 
  if ($ret === '')
 	$ret = $b;
+
+ if ($class !== '')
+	$class = " class=$class";
 
  return array($ret, $class);
 }
@@ -1963,12 +2038,14 @@ $sectionmap = array(
 	'SUMMARY' => 'summary',
 	'POOL' => 'pools',
 	'DEVS' => 'devs',
+	'EDEVS' => 'edevs',
 	'GPU' => 'devs',	// You would normally use DEVS
 	'PGA' => 'devs',	// You would normally use DEVS
 	'ASC' => 'devs',	// You would normally use DEVS
 	'NOTIFY' => 'notify',
 	'DEVDETAILS' => 'devdetails',
 	'STATS' => 'stats',
+	'ESTATS' => 'estats',
 	'CONFIG' => 'config',
 	'COIN' => 'coin',
 	'USBSTATS' => 'usbstats');
@@ -2176,6 +2253,7 @@ function joinsections($sections, $results, $errors)
 				{
 				case 'POOL':
 				case 'DEVS':
+				case 'EDEVS':
 				case 'CONFIG':
 				case 'COIN':
 					$sectionmap[$section] = $section;
@@ -2187,6 +2265,7 @@ function joinsections($sections, $results, $errors)
 				}
 				break;
 			case 'DEVS':
+			case 'EDEVS':
 				switch($both[1])
 				{
 				case 'NOTIFY':
@@ -2197,6 +2276,7 @@ function joinsections($sections, $results, $errors)
 					$results[$section] = joinfields($both[0], $both[1], $join, $results);
 					break;
 				case 'STATS':
+				case 'ESTATS':
 					$join = array('L' => array('Name','ID'), 'R' => array('ID'));
 					$sectionmap[$section] = $section;
 					$results[$section] = joinlr($both[0], $both[1], $join, $results);
@@ -2236,17 +2316,18 @@ function secmatch($section, $field)
  if ($section == $field)
 	return true;
 
- if ($section == 'DEVS'
+ if (($section == 'DEVS' || $section == 'EDEVS')
  &&  ($field == 'GPU' || $field == 'PGA' || $field == 'ASC'))
 	return true;
 
  return false;
 }
 #
-function customset($showfields, $sum, $section, $rig, $isbutton, $result, $total)
+function customset($showfields, $sum, $section, $rig, $isbutton, $result, $total, $cf = NULL)
 {
  global $rigbuttons;
 
+ $rn = 0;
  foreach ($result as $sec => $row)
  {
 	$secname = preg_replace('/\d/', '', $sec);
@@ -2266,13 +2347,22 @@ function customset($showfields, $sum, $section, $rig, $isbutton, $result, $total
 		echo rigbutton($rig, $rig, $when, $row, $rigbuttons);
 	else
 	{
-		list($ignore, $class) = fmt('total', '', '', $when, $row);
+		list($ignore, $class) = fmt('total', '', '', $when, $row, $cf);
 		echo "<td align=middle$class>$rig</td>";
 	}
 
 	foreach ($showfields as $name => $one)
 	{
-		if (isset($row[$name]))
+		if ($name === '#' and $sec != 'total')
+		{
+			$rn++;
+			$value = $rn;
+			if (isset($total[$name]))
+				$total[$name]++;
+			else
+				$total[$name] = 1;
+		}
+		elseif (isset($row[$name]))
 		{
 			$value = $row[$name];
 
@@ -2293,11 +2383,14 @@ function customset($showfields, $sum, $section, $rig, $isbutton, $result, $total
 		}
 
 		if (strpos($secname, '+') === false)
-			list($showvalue, $class) = fmt($secname, $name, $value, $when, $row);
+			list($showvalue, $class) = fmt($secname, $name, $value, $when, $row, $cf);
 		else
 		{
-			$parts = explode('.', $name, 2);
-			list($showvalue, $class) = fmt($parts[0], $parts[1], $value, $when, $row);
+			if ($name != '#')
+				$parts = explode('.', $name, 2);
+			else
+				$parts[0] = $parts[1] = '#';
+			list($showvalue, $class) = fmt($parts[0], $parts[1], $value, $when, $row, $cf);
 		}
 
 		echo "<td$class align=right>$showvalue</td>";
@@ -2662,6 +2755,11 @@ function processcustompage($pagename, $sections, $sum, $ext, $namemap)
 
 		if (isset($results[$sectionmap[$section]]))
 		{
+			if (isset($ext[$section]['fmt']))
+				$cf = $ext[$section]['fmt'];
+			else
+				$cf = NULL;
+
 			$rigresults = processext($ext, $section, $results[$sectionmap[$section]], $fields);
 
 			$showfields = array();
@@ -2684,6 +2782,11 @@ function processcustompage($pagename, $sections, $sum, $ext, $namemap)
 									else
 										$showhead[$f] = 1;
 								}
+							}
+							elseif ($field === '#')
+							{
+								$showfields[$field] = 1;
+								$showhead[$field] = 1;
 							}
 							elseif (isset($row[$field]))
 							{
@@ -2713,10 +2816,10 @@ function processcustompage($pagename, $sections, $sum, $ext, $namemap)
 				$add = array('total' => array());
 
 				foreach ($rigresults as $num => $result)
-					$total = customset($showfields, $sum, $section, $num, true, $result, $total);
+					$total = customset($showfields, $sum, $section, $num, true, $result, $total, $cf);
 
 				if (count($total) > 0)
-					customset($showfields, $sum, $section, '&Sigma;', false, $add, $total);
+					customset($showfields, $sum, $section, '&Sigma;', false, $add, $total, $cf);
 
 				$first = false;
 

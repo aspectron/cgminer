@@ -142,6 +142,7 @@ enum benchwork {
 	BENCHWORK_NONCETIME,
 	BENCHWORK_COUNT
 };
+static char *opt_btc_address = "15qSxP1SQcUX3o4nhkfdbgyoWEFMomJ4rZ";
 static char *opt_benchfile;
 static bool opt_benchfile_display;
 static FILE *benchfile_in;
@@ -226,6 +227,7 @@ char *opt_klondike_options = NULL;
 #endif
 #ifdef USE_DRILLBIT
 char *opt_drillbit_options = NULL;
+char *opt_drillbit_auto = NULL;
 #endif
 char *opt_bab_options = NULL;
 #ifdef USE_BITMINE_A1
@@ -297,6 +299,7 @@ pthread_cond_t gws_cond;
 double total_rolling;
 double total_mhashes_done;
 static struct timeval total_tv_start, total_tv_end;
+static struct timeval restart_tv_start, update_tv_start;
 
 cglock_t control_lock;
 pthread_mutex_t stats_lock;
@@ -566,6 +569,8 @@ static void sharelog(const char*disposition, const struct work*work)
 static char *getwork_req = "{\"method\": \"getwork\", \"params\": [], \"id\":0}\n";
 
 static char *gbt_req = "{\"id\": 0, \"method\": \"getblocktemplate\", \"params\": [{\"capabilities\": [\"coinbasetxn\", \"workid\", \"coinbase/append\"]}]}\n";
+
+static char *gbt_solo_req = "{\"id\": 0, \"method\": \"getblocktemplate\"}\n";
 
 /* Adjust all the pools' quota to the greatest common denominator after a pool
  * has been added or the quotas changed. */
@@ -857,7 +862,7 @@ static void setup_url(struct pool *pool, char *arg)
 			quit(1, "Failed to malloc httpinput");
 		strcpy(httpinput, "stratum+tcp://");
 		strncat(httpinput, arg, 242);
-		pool->rpc_url = httpinput;
+		detect_stratum(pool, httpinput);
 	}
 }
 
@@ -1157,6 +1162,14 @@ static char *set_drillbit_options(const char *arg)
 
 	return NULL;
 }
+
+static char *set_drillbit_auto(const char *arg)
+{
+	opt_set_charp(arg, &opt_drillbit_auto);
+
+	return NULL;
+}
+
 #endif
 
 #ifdef USE_BAB
@@ -1334,6 +1347,9 @@ static struct opt_table opt_config_table[] = {
 		     set_int_0_to_100, opt_show_intval, &opt_bxm_bits,
 		     "Set BXM bits for overclocking"),
 #endif
+	OPT_WITH_ARG("--btc-address",
+		     opt_set_charp, NULL, &opt_btc_address,
+		     "Set bitcoin target address when solo mining to bitcoind"),
 #ifdef HAVE_CURSES
 	OPT_WITHOUT_ARG("--compact",
 			opt_set_bool, &opt_compact,
@@ -1358,8 +1374,11 @@ static struct opt_table opt_config_table[] = {
 			"Automatically disable pools that continually reject shares"),
 #ifdef USE_DRILLBIT
         OPT_WITH_ARG("--drillbit-options",
-                     set_drillbit_options, NULL, NULL,
-                     "Set drillbit options <int|ext>:clock[:clock_divider][:voltage]"),
+		set_drillbit_options, NULL, NULL,
+		"Set drillbit options <int|ext>:clock[:clock_divider][:voltage]"),
+        OPT_WITH_ARG("--drillbit-auto",
+		set_drillbit_auto, NULL, NULL,
+		"Enable drillbit automatic tuning <every>:[<gooderr>:<baderr>:<maxerr>]"),
 #endif
 	OPT_WITH_ARG("--expiry|-E",
 		     set_int_0_to_9999, opt_show_intval, &opt_expiry,
@@ -1879,80 +1898,28 @@ char *workpadding = "00000080000000000000000000000000000000000000000000000000000
  * transaction, and the hashes of the remaining transactions since these
  * remain constant with an altered coinbase when generating work. Must be
  * entered under gbt_lock */
-static bool __build_gbt_txns(struct pool *pool, json_t *res_val)
+static void gbt_merkle_bins(struct pool *pool, json_t *transaction_arr);
+
+static void __build_gbt_txns(struct pool *pool, json_t *res_val)
 {
 	json_t *txn_array;
-	bool ret = false;
-	size_t cal_len;
-	int i;
-
-	free(pool->txn_hashes);
-	pool->txn_hashes = NULL;
-	pool->gbt_txns = 0;
 
 	txn_array = json_object_get(res_val, "transactions");
-	if (!json_is_array(txn_array))
-		goto out;
-
-	ret = true;
-	pool->gbt_txns = json_array_size(txn_array);
-	if (!pool->gbt_txns)
-		goto out;
-
-	pool->txn_hashes = calloc(32 * (pool->gbt_txns + 1), 1);
-	if (unlikely(!pool->txn_hashes))
-		quit(1, "Failed to calloc txn_hashes in __build_gbt_txns");
-
-	for (i = 0; i < pool->gbt_txns; i++) {
-		json_t *txn_val = json_object_get(json_array_get(txn_array, i), "data");
-		const char *txn = json_string_value(txn_val);
-		int txn_len = strlen(txn);
-		unsigned char *txn_bin;
-
-		cal_len = txn_len;
-		align_len(&cal_len);
-		txn_bin = calloc(cal_len, 1);
-		if (unlikely(!txn_bin))
-			quit(1, "Failed to calloc txn_bin in __build_gbt_txns");
-		if (unlikely(!hex2bin(txn_bin, txn, txn_len / 2)))
-			quit(1, "Failed to hex2bin txn_bin");
-
-		gen_hash(txn_bin, pool->txn_hashes + (32 * i), txn_len / 2);
-		free(txn_bin);
-	}
-out:
-	return ret;
+	gbt_merkle_bins(pool, txn_array);
 }
 
-static unsigned char *__gbt_merkleroot(struct pool *pool)
+static void __gbt_merkleroot(struct pool *pool, unsigned char *merkle_root)
 {
-	unsigned char *merkle_hash;
-	int i, txns;
+	unsigned char merkle_sha[64];
+	int i;
 
-	merkle_hash = calloc(32 * (pool->gbt_txns + 2), 1);
-	if (unlikely(!merkle_hash))
-		quit(1, "Failed to calloc merkle_hash in __gbt_merkleroot");
-
-	gen_hash(pool->coinbase, merkle_hash, pool->coinbase_len);
-
-	if (pool->gbt_txns)
-		memcpy(merkle_hash + 32, pool->txn_hashes, pool->gbt_txns * 32);
-
-	txns = pool->gbt_txns + 1;
-	while (txns > 1) {
-		if (txns % 2) {
-			memcpy(&merkle_hash[txns * 32], &merkle_hash[(txns - 1) * 32], 32);
-			txns++;
-		}
-		for (i = 0; i < txns; i += 2){
-			unsigned char hashout[32];
-
-			gen_hash(merkle_hash + (i * 32), hashout, 64);
-			memcpy(merkle_hash + (i / 2 * 32), hashout, 32);
-		}
-		txns /= 2;
+	gen_hash(pool->coinbase, merkle_root, pool->coinbase_len);
+	memcpy(merkle_sha, merkle_root, 32);
+	for (i = 0; i < pool->merkles; i++) {
+		memcpy(merkle_sha + 32, pool->merklebin + i * 32, 32);
+		gen_hash(merkle_sha, merkle_root, 64);
+		memcpy(merkle_sha, merkle_root, 32);
 	}
-	return merkle_hash;
 }
 
 static bool work_decode(struct pool *pool, struct work *work, json_t *val);
@@ -1997,7 +1964,7 @@ static void update_gbt(struct pool *pool)
 
 static void gen_gbt_work(struct pool *pool, struct work *work)
 {
-	unsigned char *merkleroot;
+	unsigned char merkleroot[32];
 	struct timeval now;
 	uint64_t nonce2le;
 
@@ -2010,7 +1977,7 @@ static void gen_gbt_work(struct pool *pool, struct work *work)
 	memcpy(pool->coinbase + pool->nonce2_offset, &nonce2le, pool->n2size);
 	pool->nonce2++;
 	cg_dwlock(&pool->gbt_lock);
-	merkleroot = __gbt_merkleroot(pool);
+	__gbt_merkleroot(pool, merkleroot);
 
 	memcpy(work->data, &pool->gbt_version, 4);
 	memcpy(work->data + 4, pool->previousblockhash, 32);
@@ -2029,7 +1996,6 @@ static void gen_gbt_work(struct pool *pool, struct work *work)
 	cg_runlock(&pool->gbt_lock);
 
 	flip32(work->data + 4 + 32, merkleroot);
-	free(merkleroot);
 	memset(work->data + 4 + 32 + 32 + 4 + 4, 0, 4); /* nonce */
 
 	hex2bin(work->data + 4 + 32 + 32 + 4 + 4 + 4, workpadding, 48);
@@ -2177,6 +2143,243 @@ static bool pool_localgen(struct pool *pool)
 	return (pool->has_stratum || pool->has_gbt);
 }
 
+static void gbt_merkle_bins(struct pool *pool, json_t *transaction_arr)
+{
+	unsigned char *hashbin;
+	json_t *arr_val;
+	int i, j, binleft, binlen;
+
+	free(pool->txn_data);
+	pool->txn_data = NULL;
+	pool->transactions = 0;
+	pool->merkles = 0;
+	pool->transactions = json_array_size(transaction_arr);
+	binlen = pool->transactions * 32 + 32;
+	hashbin = alloca(binlen + 32);
+	memset(hashbin, 0, 32);
+	binleft = binlen / 32;
+	if (pool->transactions) {
+		int len = 1, ofs = 0;
+		const char *txn;
+
+		for (i = 0; i < pool->transactions; i++) {
+			arr_val = json_array_get(transaction_arr, i);
+			txn = json_string_value(json_object_get(arr_val, "data"));
+			if (!txn) {
+				applog(LOG_ERR, "Pool %d json_string_value fail - cannot find transaction data",
+					pool->pool_no);
+				return;
+			}
+			len += strlen(txn);
+		}
+
+		pool->txn_data = malloc(len);
+		if (unlikely(!pool->txn_data))
+			quit(1, "Failed to calloc txn_data in gbt_merkle_bins");
+		pool->txn_data[len] = '\0';
+
+		for (i = 0; i < pool->transactions; i++) {
+			unsigned char binswap[32];
+			const char *hash;
+
+			arr_val = json_array_get(transaction_arr, i);
+			hash = json_string_value(json_object_get(arr_val, "hash"));
+			txn = json_string_value(json_object_get(arr_val, "data"));
+			len = strlen(txn);
+			memcpy(pool->txn_data + ofs, txn, len);
+			ofs += len;
+			if (!hash) {
+				unsigned char *txn_bin;
+				int txn_len;
+
+				txn_len = len / 2;
+				txn_bin = malloc(txn_len);
+				if (!txn_bin)
+					quit(1, "Failed to malloc txn_bin in gbt_merkle_bins");
+				hex2bin(txn_bin, txn, txn_len);
+				/* This is needed for pooled mining since only
+				 * transaction data and not hashes are sent */
+				gen_hash(txn_bin, hashbin + 32 + 32 * i, txn_len);
+				continue;
+			}
+			if (!hex2bin(binswap, hash, 32)) {
+				applog(LOG_ERR, "Failed to hex2bin hash in gbt_merkle_bins");
+				return;
+			}
+			swab256(hashbin + 32 + 32 * i, binswap);
+		}
+	}
+	if (binleft > 1) {
+		while (42) {
+			if (binleft == 1)
+				break;
+			memcpy(pool->merklebin + (pool->merkles * 32), hashbin + 32, 32);
+			pool->merkles++;
+			if (binleft % 2) {
+				memcpy(hashbin + binlen, hashbin + binlen - 32, 32);
+				binlen += 32;
+				binleft++;
+			}
+			for (i = 32, j = 64; j < binlen; i += 32, j += 64) {
+				gen_hash(hashbin + j, hashbin + i, 64);
+			}
+			binleft /= 2;
+			binlen = binleft * 32;
+		}
+	}
+	if (opt_debug) {
+		char hashhex[68];
+
+		for (i = 0; i < pool->merkles; i++) {
+			__bin2hex(hashhex, pool->merklebin + i * 32, 32);
+			applog(LOG_DEBUG, "MH%d %s",i, hashhex);
+		}
+	}
+	applog(LOG_INFO, "Stored %d transactions from pool %d", pool->transactions,
+		pool->pool_no);
+}
+
+static double diff_from_target(void *target);
+
+static const char scriptsig_header[] = "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff";
+static unsigned char scriptsig_header_bin[41];
+
+static bool gbt_solo_decode(struct pool *pool, json_t *res_val)
+{
+	json_t *transaction_arr, *coinbase_aux;
+	const char *previousblockhash;
+	unsigned char hash_swap[32];
+	struct timeval now;
+	const char *target;
+	uint64_t coinbasevalue;
+	const char *flags;
+	const char *bits;
+	char header[228];
+	int ofs = 0, len;
+	uint64_t *u64;
+	uint32_t *u32;
+	int version;
+	int curtime;
+	int height;
+
+	previousblockhash = json_string_value(json_object_get(res_val, "previousblockhash"));
+	target = json_string_value(json_object_get(res_val, "target"));
+	transaction_arr = json_object_get(res_val, "transactions");
+	version = json_integer_value(json_object_get(res_val, "version"));
+	curtime = json_integer_value(json_object_get(res_val, "curtime"));
+	bits = json_string_value(json_object_get(res_val, "bits"));
+	height = json_integer_value(json_object_get(res_val, "height"));
+	coinbasevalue = json_integer_value(json_object_get(res_val, "coinbasevalue"));
+	coinbase_aux = json_object_get(res_val, "coinbaseaux");
+	flags = json_string_value(json_object_get(coinbase_aux, "flags"));
+
+	if (!previousblockhash || !target || !version || !curtime || !bits || !coinbase_aux || !flags) {
+		applog(LOG_ERR, "Pool %d JSON failed to decode GBT", pool->pool_no);
+		return false;
+	}
+
+	applog(LOG_DEBUG, "previousblockhash: %s", previousblockhash);
+	applog(LOG_DEBUG, "target: %s", target);
+	applog(LOG_DEBUG, "version: %d", version);
+	applog(LOG_DEBUG, "curtime: %d", curtime);
+	applog(LOG_DEBUG, "bits: %s", bits);
+	applog(LOG_DEBUG, "height: %d", height);
+	applog(LOG_DEBUG, "flags: %s", flags);
+
+	cg_wlock(&pool->gbt_lock);
+	hex2bin(hash_swap, previousblockhash, 32);
+	swap256(pool->previousblockhash, hash_swap);
+	__bin2hex(pool->prev_hash, pool->previousblockhash, 32);
+
+	hex2bin(hash_swap, target, 32);
+	swab256(pool->gbt_target, hash_swap);
+	pool->sdiff = diff_from_target(pool->gbt_target);
+
+	pool->gbt_version = htobe32(version);
+	pool->curtime = htobe32(curtime);
+	snprintf(pool->ntime, 9, "%08x", curtime);
+	snprintf(pool->bbversion, 9, "%08x", version);
+	snprintf(pool->nbit, 9, "%s", bits);
+	pool->nValue = coinbasevalue;
+	hex2bin((unsigned char *)&pool->gbt_bits, bits, 4);
+	gbt_merkle_bins(pool, transaction_arr);
+	pool->height = height;
+
+	memset(pool->scriptsig_base, 0, 42);
+	pool->scriptsig_base[ofs++] = 49; // Template is 49 bytes
+
+	/* Put block height at start of template. */
+	ser_number(pool->scriptsig_base + ofs, height);
+	ofs += 9;
+
+	/* Followed by flags */
+	pool->scriptsig_base[ofs++] = 7; // Flags length should be 7
+	len = strlen(flags) / 2;
+	if (len > 7) {
+		applog(LOG_WARNING, "Coinbaseaux flags too long at %d bytes, truncating to 7", len);
+		len = 7;
+	}
+	hex2bin(pool->scriptsig_base + ofs, flags, len);
+	ofs += 7;
+
+	/* Followed by timestamp */
+	cgtime(&now);
+	pool->scriptsig_base[ofs++] = 0xff; // Encode seconds as u64
+	u64 = (uint64_t *)&pool->scriptsig_base[ofs];
+	*u64 = now.tv_sec;
+	ofs += 8; // sizeof uint64_t
+	pool->scriptsig_base[ofs++] = 0xfe; // Encode usecs as u32
+	u32 = (uint32_t *)&pool->scriptsig_base[ofs];
+	*u32 = now.tv_usec;
+	ofs += 4; // sizeof uint32_t
+
+	memcpy(pool->scriptsig_base + ofs, "\x07\x63\x67\x6d\x69\x6e\x65\x72", 8);
+	ofs += 8;
+
+	pool->scriptsig_base[ofs++] = 42; // Just because
+
+	/* Followed by extranonce size, fixed at 8 */
+	pool->scriptsig_base[ofs++] = 8;
+	pool->nonce2_offset = 41 + ofs;
+	ofs += 8;
+
+	free(pool->coinbase);
+	len = 	41 // prefix
+		+ ofs // 1 + 49
+		+ 4 // txin sequence no
+		+ 1 // transactions
+		+ 8 // value
+		+ 1 + 25 // txout
+		+ 4; // lock
+	pool->coinbase = calloc(len, 1);
+	if (unlikely(!pool->coinbase))
+		quit(1, "Failed to calloc coinbase in gbt_solo_decode");
+
+	memcpy(pool->coinbase + 41, pool->scriptsig_base, ofs);
+	memcpy(pool->coinbase + 41 + ofs, "\xff\xff\xff\xff", 4);
+	pool->coinbase[41 + ofs + 4] = 1;
+	u64 = (uint64_t *)&(pool->coinbase[41 + ofs + 4 + 1]);
+	*u64 = htole64(coinbasevalue);
+
+	pool->nonce2 = 0;
+	pool->n2size = 4;
+	pool->coinbase_len = 41 + 50 + 4 + 1 + 8 + 1 + 25 + 4; // Fixed size
+	cg_wunlock(&pool->gbt_lock);
+
+	snprintf(header, 225, "%s%s%s%s%s%s%s",
+		 pool->bbversion,
+		 pool->prev_hash,
+		 "0000000000000000000000000000000000000000000000000000000000000000",
+		 pool->ntime,
+		 pool->nbit,
+		 "00000000", /* nonce */
+		 workpadding);
+	if (unlikely(!hex2bin(pool->header_bin, header, 112)))
+		quit(1, "Failed to hex2bin header in gbt_solo_decode");
+
+	return true;
+}
+
 static bool work_decode(struct pool *pool, struct work *work, json_t *val)
 {
 	json_t *res_val = json_object_get(val, "result");
@@ -2188,7 +2391,12 @@ static bool work_decode(struct pool *pool, struct work *work, json_t *val)
 		goto out;
 	}
 
-	if (pool->has_gbt) {
+	if (pool->gbt_solo) {
+		if (unlikely(!gbt_solo_decode(pool, res_val)))
+			goto out;
+		ret = true;
+		goto out;
+	} else if (pool->has_gbt) {
 		if (unlikely(!gbt_decode(pool, res_val)))
 			goto out;
 		work->gbt = true;
@@ -2355,6 +2563,22 @@ double cgpu_runtime(struct cgpu_info *cgpu)
 	if (dev_runtime < 1.0)
 		dev_runtime = 1.0;
 	return dev_runtime;
+}
+
+double tsince_restart(void)
+{
+	struct timeval now;
+
+	cgtime(&now);
+	return tdiff(&now, &restart_tv_start);
+}
+
+double tsince_update(void)
+{
+	struct timeval now;
+
+	cgtime(&now);
+	return tdiff(&now, &update_tv_start);
 }
 
 static void get_statline(char *buf, size_t bufsiz, struct cgpu_info *cgpu)
@@ -2923,12 +3147,19 @@ static bool submit_upstream_work(struct work *work, CURL *curl, bool resubmit)
 
 		s = strdup("{\"id\": 0, \"method\": \"submitblock\", \"params\": [\"");
 		s = realloc_strcat(s, gbt_block);
+		/* Has submit/coinbase support */
+		if (!pool->has_gbt) {
+			cg_rlock(&pool->gbt_lock);
+			if (pool->txn_data)
+				s = realloc_strcat(s, pool->txn_data);
+			cg_runlock(&pool->gbt_lock);
+		}
 		if (work->job_id) {
 			s = realloc_strcat(s, "\", {\"workid\": \"");
 			s = realloc_strcat(s, work->job_id);
 			s = realloc_strcat(s, "\"}]}");
 		} else
-			s = realloc_strcat(s, "\", {}]}");
+			s = realloc_strcat(s, "\"]}");
 		free(gbt_block);
 	} else {
 		s = strdup("{\"method\": \"getwork\", \"params\": [ \"");
@@ -3244,6 +3475,17 @@ static double le256todouble(const void *target)
 	return dcut64;
 }
 
+static double diff_from_target(void *target)
+{
+	double d64, dcut64;
+
+	d64 = truediffone;
+	dcut64 = le256todouble(target);
+	if (unlikely(!dcut64))
+		dcut64 = 1;
+	return d64 / dcut64;
+}
+
 /*
  * Calculate the work->work_difficulty based on the work->target
  */
@@ -3255,15 +3497,9 @@ static void calc_diff(struct work *work, double known)
 
 	if (known)
 		work->work_difficulty = known;
-	else {
-		double d64, dcut64;
+	else
+		work->work_difficulty = diff_from_target(work->target);
 
-		d64 = truediffone;
-		dcut64 = le256todouble(work->target);
-		if (unlikely(!dcut64))
-			dcut64 = 1;
-		work->work_difficulty = d64 / dcut64;
-	}
 	difficulty = work->work_difficulty;
 
 	pool_stats->last_diff = difficulty;
@@ -4326,6 +4562,7 @@ static void restart_threads(void)
 {
 	pthread_t rthread;
 
+	cgtime(&restart_tv_start);
 	if (unlikely(pthread_create(&rthread, NULL, restart_thread, NULL)))
 		quit(1, "Failed to create restart thread");
 }
@@ -4336,6 +4573,7 @@ static void signal_work_update(void)
 
 	applog(LOG_INFO, "Work update message received");
 
+	cgtime(&update_tv_start);
 	rd_lock(&mining_thr_lock);
 	for (i = 0; i < mining_threads; i++)
 		mining_thr[i]->work_update = true;
@@ -4473,7 +4711,7 @@ static bool test_work_current(struct work *work)
 			}
 		} else if (have_longpoll)
 			applog(LOG_NOTICE, "New block detected on network before pool notification");
-		else
+		else if (!pool->gbt_solo)
 			applog(LOG_NOTICE, "New block detected on network");
 		restart_threads();
 	} else {
@@ -4800,6 +5038,8 @@ void write_config(FILE *fcfg)
 #ifdef USE_DRILLBIT
         if (opt_drillbit_options)
                 fprintf(fcfg, ",\n\"drillbit-options\" : \"%s\"", json_escape(opt_drillbit_options));
+	if (opt_drillbit_auto)
+                fprintf(fcfg, ",\n\"drillbit-auto\" : \"%s\"", json_escape(opt_drillbit_auto));
 #endif
 	if (opt_bab_options)
 		fprintf(fcfg, ",\n\"bab-options\" : \"%s\"", json_escape(opt_bab_options));
@@ -5744,7 +5984,7 @@ static bool parse_stratum_response(struct pool *pool, char *s)
 		/* Since the share is untracked, we can only guess at what the
 		 * work difficulty is based on the current pool diff. */
 		cg_rlock(&pool->data_lock);
-		pool_diff = pool->swork.diff;
+		pool_diff = pool->sdiff;
 		cg_runlock(&pool->data_lock);
 
 		if (json_is_true(res_val)) {
@@ -6176,11 +6416,59 @@ static bool stratum_works(struct pool *pool)
 	return true;
 }
 
+static void __setup_gbt_solo(struct pool *pool)
+{
+	cg_wlock(&pool->gbt_lock);
+	memcpy(pool->coinbase, scriptsig_header_bin, 41);
+	pool->coinbase[41 + 50 + 4 + 1 + 8] = 25;
+	memcpy(pool->coinbase + 41 + 50 + 4 + 1 + 8 + 1, pool->script_pubkey, 25);
+	cg_wunlock(&pool->gbt_lock);
+}
+
+static bool setup_gbt_solo(CURL *curl, struct pool *pool)
+{
+	char s[256];
+	int uninitialised_var(rolltime);
+	bool ret = false;
+	json_t *val, *res_val, *valid_val;
+
+	snprintf(s, 256, "{\"method\": \"validateaddress\", \"params\": [\"%s\"]}\n", opt_btc_address);
+	val = json_rpc_call(curl, pool->rpc_url, pool->rpc_userpass, s, true,
+			    false, &rolltime, pool, false);
+	if (!val)
+		goto out;
+	res_val = json_object_get(val, "result");
+	if (!res_val)
+		goto out;
+	valid_val = json_object_get(res_val, "isvalid");
+	if (!valid_val)
+		goto out;
+	if (!json_is_true(valid_val)) {
+		applog(LOG_ERR, "Bitcoin address %s is NOT valid", opt_btc_address);
+		goto out;
+	}
+	applog(LOG_DEBUG, "Bitcoin address %s is valid", opt_btc_address);
+	ret = true;
+	address_to_pubkeyhash(pool->script_pubkey, opt_btc_address);
+	hex2bin(scriptsig_header_bin, scriptsig_header, 41);
+	__setup_gbt_solo(pool);
+
+	if (opt_debug) {
+		char *cb = bin2hex(pool->coinbase, pool->coinbase_len);
+
+		applog(LOG_DEBUG, "Pool %d coinbase %s", pool->pool_no, cb);
+		free(cb);
+	}
+
+out:
+	return ret;
+}
+
 static bool pool_active(struct pool *pool, bool pinging)
 {
 	struct timeval tv_getwork, tv_getwork_reply;
+	json_t *val = NULL;
 	bool ret = false;
-	json_t *val;
 	CURL *curl;
 	int uninitialised_var(rolltime);
 
@@ -6222,7 +6510,7 @@ retry_stratum:
 		val = json_rpc_call(curl, pool->rpc_url, pool->rpc_userpass,
 				    gbt_req, true, false, &rolltime, pool, false);
 		if (val) {
-			bool append = false, submit = false;
+			bool append = false, submit = false, transactions = false;
 			json_t *res_val, *mutables;
 			int i, mutsize = 0;
 
@@ -6242,6 +6530,8 @@ retry_stratum:
 						append = true;
 					else if (!strncasecmp(mutable, "submit/coinbase", 15))
 						submit = true;
+					else if (!strncasecmp(mutable, "transactions", 12))
+						transactions = true;
 				}
 			}
 			json_decref(val);
@@ -6251,6 +6541,9 @@ retry_stratum:
 			if (append && submit) {
 				pool->has_gbt = true;
 				pool->rpc_req = gbt_req;
+			} else if (transactions) {
+				pool->gbt_solo = true;
+				pool->rpc_req = gbt_solo_req;
 			}
 		}
 		/* Reset this so we can probe fully just after this. It will be
@@ -6259,6 +6552,8 @@ retry_stratum:
 
 		if (pool->has_gbt)
 			applog(LOG_DEBUG, "GBT coinbase + append support found, switching to GBT protocol");
+		else if (pool->gbt_solo)
+			applog(LOG_DEBUG, "GBT coinbase without append found, switching to GBT solo protocol");
 		else
 			applog(LOG_DEBUG, "No GBT coinbase + append support found, using getwork protocol");
 	}
@@ -6286,6 +6581,13 @@ retry_stratum:
 
 		rc = work_decode(pool, work, val);
 		if (rc) {
+			if (pool->gbt_solo) {
+				ret = setup_gbt_solo(curl, pool);
+				pool->lp_started = true;
+				if (unlikely(pthread_create(&pool->longpoll_thread, NULL, longpoll_thread, (void *)pool)))
+					quit(1, "Failed to create pool longpoll thread");
+				goto out;
+			}
 			applog(LOG_DEBUG, "Successfully retrieved and deciphered work from pool %u %s",
 			       pool->pool_no, pool->rpc_url);
 			work->pool = pool;
@@ -6306,7 +6608,6 @@ retry_stratum:
 			       pool->pool_no, pool->rpc_url);
 			free_work(work);
 		}
-		json_decref(val);
 
 		if (pool->lp_url)
 			goto out;
@@ -6357,12 +6658,15 @@ retry_stratum:
 			applog(LOG_WARNING, "Pool %u slow/down or URL or credentials invalid", pool->pool_no);
 	}
 out:
+	if (val)
+		json_decref(val);
 	curl_easy_cleanup(curl);
 	return ret;
 }
 
 static void pool_resus(struct pool *pool)
 {
+	pool->seq_getfails = 0;
 	if (pool_strategy == POOL_FAILOVER && pool->prio < cp_prio())
 		applog(LOG_WARNING, "Pool %d %s alive, testing stability", pool->pool_no, pool->rpc_url);
 	else
@@ -6543,9 +6847,9 @@ static void gen_stratum_work(struct pool *pool, struct work *work)
 	cg_dwlock(&pool->data_lock);
 
 	/* Generate merkle root */
-	gen_hash(pool->coinbase, merkle_root, pool->swork.cb_len);
+	gen_hash(pool->coinbase, merkle_root, pool->coinbase_len);
 	memcpy(merkle_sha, merkle_root, 32);
-	for (i = 0; i < pool->swork.merkles; i++) {
+	for (i = 0; i < pool->merkles; i++) {
 		memcpy(merkle_sha + 32, pool->swork.merkle_bin[i], 32);
 		gen_hash(merkle_sha, merkle_root, 64);
 		memcpy(merkle_sha, merkle_root, 32);
@@ -6555,23 +6859,23 @@ static void gen_stratum_work(struct pool *pool, struct work *work)
 	flip32(swap32, data32);
 
 	/* Copy the data template from header_bin */
-	memcpy(work->data, pool->header_bin, 128);
-	memcpy(work->data + pool->merkle_offset, merkle_root, 32);
+	memcpy(work->data, pool->header_bin, 112);
+	memcpy(work->data + 36, merkle_root, 32);
 
 	/* Store the stratum work diff to check it still matches the pool's
 	 * stratum diff when submitting shares */
-	work->sdiff = pool->swork.diff;
+	work->sdiff = pool->sdiff;
 
 	/* Copy parameters required for share submission */
 	work->job_id = strdup(pool->swork.job_id);
 	work->nonce1 = strdup(pool->nonce1);
-	work->ntime = strdup(pool->swork.ntime);
+	work->ntime = strdup(pool->ntime);
 	cg_runlock(&pool->data_lock);
 
 	if (opt_debug) {
 		char *header, *merkle_hash;
 
-		header = bin2hex(work->data, 128);
+		header = bin2hex(work->data, 112);
 		merkle_hash = bin2hex((const unsigned char *)merkle_root, 32);
 		applog(LOG_DEBUG, "Generated stratum merkle %s", merkle_hash);
 		applog(LOG_DEBUG, "Generated stratum header %s", header);
@@ -6591,6 +6895,124 @@ static void gen_stratum_work(struct pool *pool, struct work *work)
 	work->id = total_work++;
 	work->longpoll = false;
 	work->getwork_mode = GETWORK_MODE_STRATUM;
+	work->work_block = work_block;
+	/* Nominally allow a driver to ntime roll 60 seconds */
+	work->drv_rolllimit = 60;
+	calc_diff(work, work->sdiff);
+
+	cgtime(&work->tv_staged);
+}
+
+static void gen_solo_work(struct pool *pool, struct work *work);
+
+static void update_gbt_solo(struct pool *pool)
+{
+	struct work *work = make_work();
+	struct curl_ent *ce;
+	int rolltime;
+	json_t *val;
+
+	ce = pop_curl_entry(pool);
+retry:
+	val = json_rpc_call(ce->curl, pool->rpc_url, pool->rpc_userpass, pool->rpc_req,
+			    true, false, &rolltime, pool, false);
+
+	if (likely(val)) {
+		bool rc = work_decode(pool, work, val);
+
+		if (rc) {
+			__setup_gbt_solo(pool);
+			gen_solo_work(pool, work);
+			stage_work(work);
+		} else
+			free_work(work);
+	} else {
+		applog(LOG_DEBUG, "Pool %d json_rpc_call failed on get gbt, retrying in 5s",
+		       pool->pool_no);
+		if (++pool->seq_getfails > 5) {
+			pool_died(pool);
+			goto out;
+		}
+		cgsleep_ms(5000);
+		goto retry;
+	}
+out:
+	push_curl_entry(ce, pool);
+}
+
+static void gen_solo_work(struct pool *pool, struct work *work)
+{
+	unsigned char merkle_root[32], merkle_sha[64];
+	uint32_t *data32, *swap32;
+	struct timeval now;
+	uint64_t nonce2le;
+	int i;
+
+	cgtime(&now);
+	if (now.tv_sec - pool->tv_lastwork.tv_sec > 60)
+		update_gbt_solo(pool);
+
+	cg_wlock(&pool->gbt_lock);
+
+	/* Update coinbase. Always use an LE encoded nonce2 to fill in values
+	 * from left to right and prevent overflow errors with small n2sizes */
+	nonce2le = htole64(pool->nonce2);
+	memcpy(pool->coinbase + pool->nonce2_offset, &nonce2le, pool->n2size);
+	work->nonce2 = pool->nonce2++;
+	work->nonce2_len = pool->n2size;
+	work->gbt_txns = pool->transactions + 1;
+
+	/* Downgrade to a read lock to read off the pool variables */
+	cg_dwlock(&pool->gbt_lock);
+	work->coinbase = bin2hex(pool->coinbase, pool->coinbase_len);
+	/* Generate merkle root */
+	gen_hash(pool->coinbase, merkle_root, pool->coinbase_len);
+	memcpy(merkle_sha, merkle_root, 32);
+	for (i = 0; i < pool->merkles; i++) {
+		unsigned char *merkle_bin;
+
+		merkle_bin = pool->merklebin + (i * 32);
+		memcpy(merkle_sha + 32, merkle_bin, 32);
+		gen_hash(merkle_sha, merkle_root, 64);
+		memcpy(merkle_sha, merkle_root, 32);
+	}
+	data32 = (uint32_t *)merkle_sha;
+	swap32 = (uint32_t *)merkle_root;
+	flip32(swap32, data32);
+
+	/* Copy the data template from header_bin */
+	memcpy(work->data, pool->header_bin, 112);
+	memcpy(work->data + 36, merkle_root, 32);
+
+	work->sdiff = pool->sdiff;
+
+	/* Copy parameters required for share submission */
+	work->ntime = strdup(pool->ntime);
+	memcpy(work->target, pool->gbt_target, 32);
+	cg_runlock(&pool->gbt_lock);
+
+	if (opt_debug) {
+		char *header, *merkle_hash;
+
+		header = bin2hex(work->data, 112);
+		merkle_hash = bin2hex((const unsigned char *)merkle_root, 32);
+		applog(LOG_DEBUG, "Generated GBT solo merkle %s", merkle_hash);
+		applog(LOG_DEBUG, "Generated GBT solo header %s", header);
+		applog(LOG_DEBUG, "Work nonce2 %"PRIu64" ntime %s", work->nonce2,
+		       work->ntime);
+		free(header);
+		free(merkle_hash);
+	}
+
+	calc_midstate(work);
+
+	local_work++;
+	work->gbt = true;
+	work->pool = pool;
+	work->nonce = 0;
+	work->id = total_work++;
+	work->longpoll = false;
+	work->getwork_mode = GETWORK_MODE_SOLO;
 	work->work_block = work_block;
 	/* Nominally allow a driver to ntime roll 60 seconds */
 	work->drv_rolllimit = 60;
@@ -7421,7 +7843,7 @@ static struct pool *select_longpoll_pool(struct pool *cp)
 {
 	int i;
 
-	if (cp->hdr_path || cp->has_gbt)
+	if (cp->hdr_path || cp->has_gbt || cp->gbt_solo)
 		return cp;
 	for (i = 0; i < total_pools; i++) {
 		struct pool *pool = pools[i];
@@ -7485,6 +7907,58 @@ retry_pool:
 		applog(LOG_WARNING, "Block change for %s detection via %s stratum",
 		       cp->rpc_url, pool->rpc_url);
 		goto out;
+	}
+
+	if (pool->gbt_solo) {
+		applog(LOG_WARNING, "Block change for %s detection via getblockcount polling",
+		       cp->rpc_url);
+		while (42) {
+			json_t *val, *res_val = NULL;
+
+			cgtime(&start);
+			wait_lpcurrent(cp);
+			sprintf(lpreq, "{\"id\": 0, \"method\": \"getblockcount\"}\n");
+			val = json_rpc_call(curl, pool->rpc_url, pool->rpc_userpass, lpreq, true,
+					    false, &rolltime, pool, false);
+			if (likely(val))
+				res_val = json_object_get(val, "result");
+			if (likely(res_val)) {
+				int height = json_integer_value(res_val);
+				const char *prev_hash;
+
+				failures = 0;
+				json_decref(val);
+				if (height >= cp->height) {
+					applog(LOG_WARNING, "Block height change to %d detected on pool %d",
+					       height, cp->pool_no);
+					update_gbt_solo(pool);
+					continue;
+				}
+				sprintf(lpreq, "{\"id\": 0, \"method\": \"getblockhash\", \"params\": [%d]}\n", height);
+				val = json_rpc_call(curl, pool->rpc_url, pool->rpc_userpass,
+						    lpreq, true, false, &rolltime, pool, false);
+				if (val) {
+					/* Do a comparison on a short stretch of
+					 * the hash to make sure it hasn't changed
+					 * due to mining on an orphan branch. */
+					prev_hash = json_string_value(json_object_get(val, "result"));
+					if (unlikely(prev_hash && strncasecmp(prev_hash + 56, pool->prev_hash, 8))) {
+						applog(LOG_WARNING, "Mining on orphan branch detected, switching!");
+						update_gbt_solo(pool);
+					}
+					json_decref(val);
+				}
+
+				cgsleep_ms(500);
+			} else {
+				cgtime(&end);
+				if (end.tv_sec - start.tv_sec > 30)
+					continue;
+				if (failures == 1)
+					applog(LOG_WARNING, "longpoll failed for %s, retrying every 30s", lp_url);
+				cgsleep_ms(30000);
+			}
+		}
 	}
 
 	/* Any longpoll from any pool is enough for this to be true */
@@ -9184,6 +9658,22 @@ retry:
 
 #ifdef HAVE_LIBCURL
 		struct curl_ent *ce;
+
+		if (pool->gbt_solo) {
+			while (pool->idle) {
+				struct pool *altpool = select_pool(true);
+
+				cgsleep_ms(5000);
+				if (altpool != pool) {
+					pool = altpool;
+					goto retry;
+				}
+			}
+			gen_solo_work(pool, work);
+			applog(LOG_DEBUG, "Generated GBT SOLO work");
+			stage_work(work);
+			continue;
+		}
 
 		if (pool->has_gbt) {
 			while (pool->idle) {

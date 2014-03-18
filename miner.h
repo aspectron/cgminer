@@ -167,6 +167,7 @@ static inline int fsync (int fd)
 #  define le64toh(x) (x)
 #  define be32toh(x) bswap_32(x)
 #  define be64toh(x) bswap_64(x)
+#  define htobe16(x) bswap_16(x)
 #  define htobe32(x) bswap_32(x)
 #  define htobe64(x) bswap_64(x)
 # elif __BYTE_ORDER == __BIG_ENDIAN
@@ -178,6 +179,7 @@ static inline int fsync (int fd)
 #  define htole64(x) bswap_64(x)
 #  define be32toh(x) (x)
 #  define be64toh(x) (x)
+#  define htobe16(x) (x)
 #  define htobe32(x) (x)
 #  define htobe64(x) (x)
 #else
@@ -679,6 +681,8 @@ endian_flip128(void __maybe_unused *dest_p, const void __maybe_unused *src_p)
 #endif
 
 extern double cgpu_runtime(struct cgpu_info *cgpu);
+extern double tsince_restart(void);
+extern double tsince_update(void);
 extern void __quit(int status, bool clean);
 extern void _quit(int status);
 
@@ -983,6 +987,7 @@ extern char *opt_klondike_options;
 #endif
 #ifdef USE_DRILLBIT
 extern char *opt_drillbit_options;
+extern char *opt_drillbit_auto;
 #endif
 #ifdef USE_BAB
 extern char *opt_bab_options;
@@ -1123,16 +1128,9 @@ enum pool_enable {
 
 struct stratum_work {
 	char *job_id;
-	char *prev_hash;
 	unsigned char **merkle_bin;
-	char *bbversion;
-	char *nbit;
-	char *ntime;
 	bool clean;
 
-	size_t cb_len;
-	size_t header_len;
-	int merkles;
 	double diff;
 };
 
@@ -1252,13 +1250,27 @@ struct pool {
 	uint32_t gbt_bits;
 	unsigned char *txn_hashes;
 	int gbt_txns;
-	int coinbase_len;
+	int height;
+
+	bool gbt_solo;
+	unsigned char merklebin[16 * 32];
+	int transactions;
+	char *txn_data;
+	unsigned char scriptsig_base[42 + 2];
+	unsigned char script_pubkey[25 + 3];
+	int nValue;
 
 	/* Shared by both stratum & GBT */
 	unsigned char *coinbase;
+	int coinbase_len;
 	int nonce2_offset;
 	unsigned char header_bin[128];
-	int merkle_offset;
+	int merkles;
+	char prev_hash[68];
+	char bbversion[12];
+	char nbit[12];
+	char ntime[12];
+	double sdiff;
 
 	struct timeval tv_lastwork;
 
@@ -1272,6 +1284,7 @@ struct pool {
 #define GETWORK_MODE_BENCHMARK 'B'
 #define GETWORK_MODE_STRATUM 'S'
 #define GETWORK_MODE_GBT 'G'
+#define GETWORK_MODE_SOLO 'C'
 
 struct work {
 	unsigned char	data[128];
