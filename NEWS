@@ -1,3 +1,80 @@
+Version 4.3.3 - 3rd May 2014
+
+- Fix typo
+- Work should be freed when aged, fixing a massive memory leak for bxf devices
+- miner.php fix single rig summary/config field formatting
+- miner.php fix single rig total formatting
+
+
+Version 4.3.2 - 2nd May 2014
+
+- Fix accounting bug with nrolltime drivers
+
+
+Version 4.3.1 - 2nd May 2014
+
+- upgrade some int to int64_t to avoid overflows in reporting
+- Make reconnection messages more explanatory
+- Stratum client.reconnect require matching URL
+- Fix memory leak in submit_noffset_nonce
+- Clean up any work that may not have been used in the work scheduler
+- Avoid unnecessary deref now that it's done within discard_work
+- Clean work pointers after one way usage functions
+- Avoid unnecessary total_work_inc in generating local work
+- Cosmetic fixes
+- Fix idle bug, when redirected client can't auth
+- Rename spond temp rate to asics total rate
+- Build fixes
+- Set the unique id only for usb devices with serial strings longer than 4 chars
+long
+- Use usb serial strings as unique id if devices have them
+- Discretely identify the onestring miners as OSM
+- Add bxf debugging option and osm led modes
+- A1: modularize board selector / add initial CCR support
+- A1: cleanup tca9535 logging
+- A1: fix and extend PLL parameters
+- A1: clean up compile warnings
+- A1: use real level in hexdump
+- Add identification for onestring miner variants
+- Avalon2: Parser the power good signal
+- driver-avalon2: this functions used on detect, which don't have thr setup yet
+
+
+Version 4.3.0 - 18th April 2014
+
+- Put sleep in spond hash instead of queue full function
+- Remove unused function for when compiled without curses
+- Fix typo
+- Add temperature rate, front, rear and device temperature to spond API output
+- Limit bxf sleep in bxf_scan to 100ms minimum for strings of many chips
+- -Werror=format-security error on driver-bitmain.c
+- Fix parameters passed with getblockhash
+- Check the block hash with the proper command when looking for orphan chains
+- syslog requires a facility ... in more than one place
+- Shuffle windows headers included
+- Adjust the bxf sleep time according to the number of chips detected
+- Fix off by one error in bxf chip count when adjusting device size
+- Recalloc correct pointer
+- Make instructions associated with winusb error even more explicit
+- Add midsing headers to cgminer source in Makefile
+- Trivial style changes to mg proto parser
+- Trivial style and warning clean ups on spondoolies driver
+- Merge spondoolies driver patch
+- Call any BXF device with 3-6 chips reported HXF
+- Avoid derefrence when calling statline before on hfa device during init
+sequence
+- Calloc the info structures even on failed hfa reset to prevent later possible
+dereference
+- Load all hfa devices based on identification alone and defer init sequence
+till mining thread init sequence to allow all devices to be recognised rapidly
+but each device initialisation not delay others
+- Do not do thread shutdown unless thread init succeeded
+- Remove unnecessary check for thread_prepare function
+- Recognise variations on BXF based on chip value returned in responses
+- Provide helper function for recallocing memory
+- syslog requires a facility
+
+
 Version 4.2.3 - 3rd April 2014
 
 - Decay the per device hashrates when only the watchdog is calling the hashmeter
