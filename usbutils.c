@@ -62,6 +62,7 @@ static cgtimer_t usb11_cgt;
 
 // There is no windows version
 #define ANT_S1_TIMEOUT_MS 200
+#define ANT_S2_TIMEOUT_MS 200
 
 #ifdef WIN32
 #define BFLSC_TIMEOUT_MS 999
@@ -346,6 +347,17 @@ static struct usb_intinfo ants1_ints[] = {
 };
 #endif
 
+#ifdef USE_ANT_S2
+static struct usb_epinfo ants2_epinfos[] = {
+	{ LIBUSB_TRANSFER_TYPE_BULK,	64,	EPI(1), 0, 0 },
+	{ LIBUSB_TRANSFER_TYPE_BULK,	64,	EPO(1), 0, 0 }
+};
+
+static struct usb_intinfo ants2_ints[] = {
+	USB_EPS(0, ants2_epinfos)
+};
+#endif
+
 #define IDVENDOR_FTDI 0x0403
 
 #define INTINFO(_ints) \
@@ -571,6 +583,16 @@ static struct usb_find_devices find_dev[] = {
 		INTINFO(amu_ints) },
 	{
 		.drv = DRIVER_icarus,
+		.name = "LIN",
+		.ident = IDENT_LIN,
+		.idVendor = 0x10c4,
+		.idProduct = 0xea60,
+		.config = 1,
+		.timeout = ICARUS_TIMEOUT_MS,
+		.latency = LATENCY_UNUSED,
+		INTINFO(amu_ints) },
+	{
+		.drv = DRIVER_icarus,
 		.name = "ANU",
 		.ident = IDENT_ANU,
 		.idVendor = 0x10c4,
@@ -647,6 +669,18 @@ static struct usb_find_devices find_dev[] = {
 		.timeout = ANT_S1_TIMEOUT_MS,
 		.latency = LATENCY_ANTS1,
 		INTINFO(ants1_ints) },
+#endif
+#ifdef USE_ANT_S2
+	{
+		.drv = DRIVER_ants1,
+		.name = "AS2",
+		.ident = IDENT_AS2,
+		.idVendor = 0x4254,
+		.idProduct = 0x4153,
+		.config = 1,
+		.timeout = ANT_S2_TIMEOUT_MS,
+		.latency = LATENCY_ANTS2,
+		INTINFO(ants2_ints) },
 #endif
 	{ DRIVER_MAX, NULL, 0, 0, 0, NULL, NULL, 0, 0, 0, 0, NULL }
 };
@@ -1731,7 +1765,7 @@ static bool __release_cgpu(struct cgpu_info *cgpu)
 
 			lookcgpu->usbinfo.nodev = true;
 			lookcgpu->usbinfo.nodev_count++;
-			memcpy(&(lookcgpu->usbinfo.last_nodev),
+			cg_memcpy(&(lookcgpu->usbinfo.last_nodev),
 				&(cgpu->usbinfo.last_nodev), sizeof(struct timeval));
 			lookcgpu->usbdev = NULL;
 		}
@@ -1804,7 +1838,7 @@ struct cgpu_info *usb_copy_cgpu(struct cgpu_info *orig)
 
 	copy->usbdev = orig->usbdev;
 
-	memcpy(&(copy->usbinfo), &(orig->usbinfo), sizeof(copy->usbinfo));
+	cg_memcpy(&(copy->usbinfo), &(orig->usbinfo), sizeof(copy->usbinfo));
 
 	copy->usbinfo.nodev = (copy->usbdev == NULL);
 
@@ -2202,7 +2236,7 @@ bool usb_init(struct cgpu_info *cgpu, struct libusb_device *dev, struct usb_find
 			found_use = malloc(sizeof(*found_use));
 			if (unlikely(!found_use))
 				quit(1, "USB failed to malloc found_use");
-			memcpy(found_use, &(find_dev[i]), sizeof(*found_use));
+			cg_memcpy(found_use, &(find_dev[i]), sizeof(*found_use));
 
 			ret = _usb_init(cgpu, dev, found_use);
 
@@ -2278,7 +2312,7 @@ static struct usb_find_devices *usb_check_each(int drvnum, struct device_drv *dr
 				found = malloc(sizeof(*found));
 				if (unlikely(!found))
 					quit(1, "USB failed to malloc found");
-				memcpy(found, &(find_dev[i]), sizeof(*found));
+				cg_memcpy(found, &(find_dev[i]), sizeof(*found));
 				return found;
 			}
 		}
@@ -2595,7 +2629,7 @@ static void stats(struct cgpu_info *cgpu, struct timeval *tv_start, struct timev
 
 	if (details->item[item].count == 0) {
 		details->item[item].min_delay = diff;
-		memcpy(&(details->item[item].first), tv_start, sizeof(*tv_start));
+		cg_memcpy(&(details->item[item].first), tv_start, sizeof(*tv_start));
 	} else if (diff < details->item[item].min_delay)
 		details->item[item].min_delay = diff;
 
@@ -2603,7 +2637,7 @@ static void stats(struct cgpu_info *cgpu, struct timeval *tv_start, struct timev
 		details->item[item].max_delay = diff;
 
 	details->item[item].total_delay += diff;
-	memcpy(&(details->item[item].last), tv_start, sizeof(*tv_start));
+	cg_memcpy(&(details->item[item].last), tv_start, sizeof(*tv_start));
 	details->item[item].count++;
 }
 
@@ -2807,7 +2841,7 @@ err_retry:
 	init_usb_transfer(&ut);
 
 	if ((endpoint & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_OUT) {
-		memcpy(buf, data, length);
+		cg_memcpy(buf, data, length);
 #ifndef HAVE_LIBUSB
 		/* Older versions may not have this feature so only enable it
 		 * when we know we're compiling with included static libusb. We
@@ -2874,8 +2908,8 @@ err_retry:
 		goto err_retry;
 	if (NODEV(err))
 		*transferred = 0;
-	else if ((endpoint & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_IN)
-		memcpy(data, buf, *transferred);
+	else if ((endpoint & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_IN && *transferred)
+		cg_memcpy(data, buf, *transferred);
 
 	return err;
 }
@@ -2948,7 +2982,7 @@ int _usb_read(struct cgpu_info *cgpu, int intinfo, int epinfo, char *buf, size_t
 	tot = usbdev->bufamt;
 	bufleft = bufsiz - tot;
 	if (tot)
-		memcpy(usbbuf, usbdev->buffer, tot);
+		cg_memcpy(usbbuf, usbdev->buffer, tot);
 	ptr = usbbuf + tot;
 	usbdev->bufamt = 0;
 
@@ -3030,7 +3064,7 @@ int _usb_read(struct cgpu_info *cgpu, int intinfo, int epinfo, char *buf, size_t
 	// N.B. usbdev->buffer was emptied before the while() loop
 	if (tot > (int)bufsiz) {
 		usbdev->bufamt = tot - bufsiz;
-		memcpy(usbdev->buffer, usbbuf + bufsiz, usbdev->bufamt);
+		cg_memcpy(usbdev->buffer, usbbuf + bufsiz, usbdev->bufamt);
 		tot -= usbdev->bufamt;
 		usbbuf[tot] = '\0';
 		applog(LOG_DEBUG, "USB: %s%i read1 buffering %d extra bytes",
@@ -3038,7 +3072,7 @@ int _usb_read(struct cgpu_info *cgpu, int intinfo, int epinfo, char *buf, size_t
 	}
 
 	*processed = tot;
-	memcpy((char *)buf, (const char *)usbbuf, (tot < (int)bufsiz) ? tot + 1 : (int)bufsiz);
+	cg_memcpy((char *)buf, (const char *)usbbuf, (tot < (int)bufsiz) ? tot + 1 : (int)bufsiz);
 
 out_noerrmsg:
 	if (NODEV(err)) {
@@ -3167,7 +3201,8 @@ static int usb_control_transfer(struct cgpu_info *cgpu, libusb_device_handle *de
 	libusb_fill_control_setup(buf, bmRequestType, bRequest, wValue,
 				  wIndex, wLength);
 	if ((bmRequestType & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_OUT) {
-		memcpy(buf + LIBUSB_CONTROL_SETUP_SIZE, buffer, wLength);
+		if (wLength)
+			cg_memcpy(buf + LIBUSB_CONTROL_SETUP_SIZE, buffer, wLength);
 		if (cgpu->usbdev->descriptor->bcdUSB < 0x0200)
 			tt = true;
 	}
@@ -3178,7 +3213,7 @@ static int usb_control_transfer(struct cgpu_info *cgpu, libusb_device_handle *de
 		err = callback_wait(&ut, &transferred, timeout);
 	if (err == LIBUSB_SUCCESS && transferred) {
 		if ((bmRequestType & LIBUSB_ENDPOINT_DIR_MASK) == LIBUSB_ENDPOINT_IN)
-			memcpy(buffer, libusb_control_transfer_get_data(ut.transfer),
+			cg_memcpy(buffer, libusb_control_transfer_get_data(ut.transfer),
 			       transferred);
 		err = transferred;
 		goto out;
@@ -3290,7 +3325,7 @@ int _usb_transfer_read(struct cgpu_info *cgpu, uint8_t request_type, uint8_t bRe
 				   wValue, wIndex, tbuf, (uint16_t)bufsiz, timeout);
 	STATS_TIMEVAL(&tv_finish);
 	USB_STATS(cgpu, &tv_start, &tv_finish, err, MODE_CTRL_READ, cmd, SEQ0, timeout);
-	memcpy(buf, tbuf, bufsiz);
+	cg_memcpy(buf, tbuf, bufsiz);
 
 	USBDEBUG("USB debug: @_usb_transfer_read(%s (nodev=%s)) amt/err=%d%s%s%s", cgpu->drv->name, bool_str(cgpu->usbinfo.nodev), err, isnodev(err), err > 0 ? " = " : BLANK, err > 0 ? bin2hex((unsigned char *)buf, (size_t)err) : BLANK);
 

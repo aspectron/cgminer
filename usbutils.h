@@ -137,6 +137,7 @@ enum sub_ident {
 	IDENT_AMU,
 	IDENT_ANT,
 	IDENT_ANU,
+	IDENT_AS2,
 	IDENT_AVA,
 	IDENT_BAJ,
 	IDENT_BAL,
@@ -156,6 +157,7 @@ enum sub_ident {
 	IDENT_HFA,
 	IDENT_ICA,
 	IDENT_KLN,
+	IDENT_LIN,
 	IDENT_LLT,
 	IDENT_MMQ,
 	IDENT_NFU,
@@ -183,6 +185,7 @@ struct usb_find_devices {
 #define LATENCY_UNUSED 0
 #define LATENCY_STD 32
 #define LATENCY_ANTS1 10
+#define LATENCY_ANTS2 10
 
 enum usb_types {
 	USB_TYPE_STD = 0,

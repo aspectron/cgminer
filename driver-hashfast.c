@@ -1814,12 +1814,20 @@ static struct api_data *hfa_api_stats(struct cgpu_info *cgpu)
 	root = api_add_int(root, "max rx buf", &varint, true);
 
 	for (i = 0; i < info->asic_count; i++) {
-		struct hf_long_statistics *l = &info->die_statistics[i];
-		struct hf_g1_die_data *d = &info->die_status[i];
+		struct hf_long_statistics *l;
+		struct hf_g1_die_data *d;
 		char which[16];
 		double val;
 		int j;
 
+		if (!info->die_statistics || !info->die_status)
+			continue;
+		l = &info->die_statistics[i];
+		if (!l)
+			continue;
+		d = &info->die_status[i];
+		if (!d)
+			continue;
 		snprintf(which, sizeof(which), "Asic%d", i);
 
 		snprintf(buf, sizeof(buf), "%s hash clockrate", which);
@@ -1934,7 +1942,7 @@ struct device_drv hashfast_drv = {
 	.drv_id = DRIVER_hashfast,
 	.dname = "Hashfast",
 	.name = "HFA",
-	.max_diff = 256.0, // Limit max diff to get some nonces back regardless
+	.max_diff = 32.0, // Limit max diff to get some nonces back regardless
 	.drv_detect = hfa_detect,
 	.thread_init = hfa_init,
 	.hash_work = &hash_driver_work,

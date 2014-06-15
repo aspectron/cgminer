@@ -208,12 +208,6 @@ static inline int fsync (int fd)
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 #endif
 
-#ifdef MIPSEB
-#ifndef roundl
-#define roundl(x)   (long double)((long long)((x==0)?0.0:((x)+((x)>0)?0.5:-0.5)))
-#endif
-#endif
-
 /* No semtimedop on apple so ignore timeout till we implement one */
 #ifdef __APPLE__
 #define semtimedop(SEM, SOPS, VAL, TIMEOUT) semop(SEM, SOPS, VAL)
@@ -247,6 +241,7 @@ static inline int fsync (int fd)
 	DRIVER_ADD_COMMAND(bab) \
 	DRIVER_ADD_COMMAND(minion) \
 	DRIVER_ADD_COMMAND(ants1) \
+	DRIVER_ADD_COMMAND(ants2) \
 	DRIVER_ADD_COMMAND(avalon2) \
 	DRIVER_ADD_COMMAND(avalon) \
 	DRIVER_ADD_COMMAND(spondoolies)
@@ -351,7 +346,6 @@ struct device_drv {
 
 	/* Highest target diff the device supports */
 	double max_diff;
-	double working_diff;
 };
 
 extern struct device_drv *copy_drv(struct device_drv*);
@@ -429,6 +423,7 @@ struct cgpu_info {
 	char *name;
 	char *device_path;
 	void *device_data;
+	void *dup_data;
 	char *unique_id;
 #ifdef USE_USBUTILS
 	struct cg_usb_device *usbdev;
@@ -518,6 +513,11 @@ struct cgpu_info {
 	bool shutdown;
 
 	struct timeval dev_start_tv;
+
+	/* For benchmarking only */
+	int hidiff;
+	int lodiff;
+	int direction;
 };
 
 extern bool add_cgpu(struct cgpu_info*);
@@ -986,6 +986,7 @@ extern bool opt_restart;
 extern char *opt_icarus_options;
 extern char *opt_icarus_timing;
 extern float opt_anu_freq;
+extern float opt_rock_freq;
 #endif
 extern bool opt_worktime;
 extern bool opt_drdd;
@@ -1009,6 +1010,23 @@ extern char *opt_bitmine_a1_options;
 #ifdef USE_ANT_S1
 extern char *opt_bitmain_options;
 extern bool opt_bitmain_hwerror;
+#endif
+#ifdef USE_ANT_S2
+extern char *opt_bitmain_dev;
+extern char *opt_bitmain_options;
+extern bool opt_bitmain_hwerror;
+extern bool opt_bitmain_checkall;
+extern bool opt_bitmain_checkn2diff;
+extern bool opt_bitmain_beeper;
+extern bool opt_bitmain_tempoverctrl;
+#endif
+#ifdef USE_MINION
+extern int opt_minion_chipreport;
+extern char *opt_minion_cores;
+extern char *opt_minion_freq;
+extern bool opt_minion_idlecount;
+extern bool opt_minion_overheat;
+extern char *opt_minion_temp;
 #endif
 #ifdef USE_USBUTILS
 extern char *opt_usb_select;
@@ -1307,7 +1325,8 @@ struct work {
 	unsigned char	target[32];
 	unsigned char	hash[32];
 
-	unsigned char	device_target[32];
+	/* This is the diff the device is currently aiming for and must be
+	 * the minimum of work_difficulty & drv->max_diff */
 	double		device_diff;
 	uint64_t	share_diff;
 
@@ -1345,6 +1364,8 @@ struct work {
 	uint32_t	id;
 	UT_hash_handle	hh;
 
+	/* This is the diff work we're aiming to submit and should match the
+	 * work->target binary */
 	double		work_difficulty;
 
 	// Allow devices to identify work if multiple sub-devices
@@ -1448,6 +1469,7 @@ extern bool log_curses_only(int prio, const char *datetime, const char *str);
 extern void clear_logwin(void);
 extern void logwin_update(void);
 extern bool pool_tclear(struct pool *pool, bool *var);
+extern void pool_failed(struct pool *pool);
 extern struct thread_q *tq_new(void);
 extern void tq_free(struct thread_q *tq);
 extern bool tq_push(struct thread_q *tq, void *data);
@@ -1537,5 +1559,8 @@ extern struct api_data *api_add_hs(struct api_data *root, char *name, double *da
 extern struct api_data *api_add_diff(struct api_data *root, char *name, double *data, bool copy_data);
 extern struct api_data *api_add_percent(struct api_data *root, char *name, double *data, bool copy_data);
 extern struct api_data *api_add_avg(struct api_data *root, char *name, float *data, bool copy_data);
+
+extern void dupalloc(struct cgpu_info *cgpu, int timelimit);
+extern bool isdupnonce(struct cgpu_info *cgpu, struct work *work, uint32_t nonce);
 
 #endif /* __MINER_H__ */

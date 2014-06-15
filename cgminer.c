@@ -109,7 +109,7 @@ inline int hfa_get_hash_clock(struct cgpu_info *cgpu) {
 }
 #endif
 
-#ifdef USE_ANT_S1
+#if defined(USE_ANT_S1) || defined(USE_ANT_S2)
 #include "driver-bitmain.h"
 #endif
 
@@ -147,8 +147,11 @@ enum benchwork {
 	BENCHWORK_NONCETIME,
 	BENCHWORK_COUNT
 };
+
+#ifdef HAVE_LIBCURL
 static char *opt_btc_address;
 static char *opt_btc_sig;
+#endif
 static char *opt_benchfile;
 static bool opt_benchfile_display;
 static FILE *benchfile_in;
@@ -221,6 +224,7 @@ static bool no_work;
 char *opt_icarus_options = NULL;
 char *opt_icarus_timing = NULL;
 float opt_anu_freq = 200;
+float opt_rock_freq = 270;
 #endif
 bool opt_worktime;
 bool opt_drdd;
@@ -246,15 +250,26 @@ char *opt_bab_options = NULL;
 #ifdef USE_BITMINE_A1
 char *opt_bitmine_a1_options = NULL;
 #endif
-#ifdef USE_ANT_S1
+#if defined(USE_ANT_S1) || defined(USE_ANT_S2)
 char *opt_bitmain_options;
 static char *opt_set_bitmain_fan;
 static char *opt_set_bitmain_freq;
+#endif
+#ifdef USE_ANT_S2
+char *opt_bitmain_dev;
 #endif
 #ifdef USE_HASHFAST
 static char *opt_set_hfa_fan;
 #endif
 static char *opt_set_null;
+#ifdef USE_MINION
+int opt_minion_chipreport;
+char *opt_minion_cores;
+char *opt_minion_freq;
+bool opt_minion_idlecount;
+bool opt_minion_overheat;
+char *opt_minion_temp;
+#endif
 
 #ifdef USE_USBUTILS
 char *opt_usb_select = NULL;
@@ -787,10 +802,10 @@ static char *set_loadbalance(enum pool_strategy *strategy)
 	return NULL;
 }
 
-static char *set_rotate(const char *arg, int *i)
+static char *set_rotate(const char *arg, char __maybe_unused *i)
 {
 	pool_strategy = POOL_ROTATE;
-	return set_int_range(arg, i, 0, 9999);
+	return set_int_range(arg, &opt_rotate_period, 0, 9999);
 }
 
 static char *set_rr(enum pool_strategy *strategy)
@@ -1066,7 +1081,7 @@ static char *set_null(const char __maybe_unused *arg)
 static struct opt_table opt_config_table[] = {
 #ifdef USE_ICARUS
 	OPT_WITH_ARG("--anu-freq",
-		     set_float_125_to_500, &opt_show_intval, &opt_anu_freq,
+		     set_float_125_to_500, &opt_show_floatval, &opt_anu_freq,
 		     "Set AntminerU1 frequency in MHz, range 125-500"),
 #endif
 	OPT_WITH_ARG("--api-allow",
@@ -1132,6 +1147,9 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITH_CBARG("--avalon2-voltage",
 		     set_avalon2_voltage, NULL, &opt_set_avalon2_voltage,
 		     "Set Avalon2 core voltage, in millivolts"),
+	OPT_WITH_ARG("--avalon2-cutoff",
+		     set_int_0_to_100, opt_show_intval, &opt_avalon2_overheat,
+		     "Set Avalon2 overheat cut off temperature"),
 #endif
 #ifdef USE_BAB
 	OPT_WITH_ARG("--bab-options",
@@ -1171,7 +1189,7 @@ static struct opt_table opt_config_table[] = {
 		     opt_set_charp, NULL, &opt_bitburner_fury_options,
 		     "Override avalon-options for BitBurner Fury boards baud:miners:asic:timeout:freq"),
 #endif
-#ifdef USE_ANT_S1
+#if defined(USE_ANT_S1) || defined(USE_ANT_S2)
 	OPT_WITHOUT_ARG("--bitmain-auto",
 			opt_set_bool, &opt_bitmain_auto,
 			"Adjust bitmain overclock frequency dynamically for best hashrate"),
@@ -1193,6 +1211,23 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITH_ARG("--bitmain-temp",
 		     set_int_0_to_100, opt_show_intval, &opt_bitmain_temp,
 		     "Set bitmain target temperature"),
+#endif
+#ifdef USE_ANT_S2
+	OPT_WITH_ARG("--bitmain-dev",
+		     opt_set_charp, NULL, &opt_bitmain_dev,
+		     "Set bitmain device"),
+	OPT_WITHOUT_ARG("--bitmainbeeper",
+			opt_set_bool, &opt_bitmain_beeper,
+			"Set bitmain beeper ringing"),
+	OPT_WITHOUT_ARG("--bitmain-checkall",
+			opt_set_bool, &opt_bitmain_checkall,
+			opt_hidden),
+	OPT_WITHOUT_ARG("--bitmain-checkn2diff",
+			opt_set_bool, &opt_bitmain_checkn2diff,
+			opt_hidden),
+	OPT_WITHOUT_ARG("--bitmaintempoverctrl",
+			opt_set_bool, &opt_bitmain_tempoverctrl,
+			"Set bitmain stop runing when temprerature is over 80 degree Celsius"),
 #endif
 #ifdef USE_BITMINE_A1
 	OPT_WITH_ARG("--bitmine-a1-options",
@@ -1327,6 +1362,26 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITHOUT_ARG("--lowmem",
 			opt_set_bool, &opt_lowmem,
 			"Minimise caching of shares for low memory applications"),
+#ifdef USE_MINION
+	OPT_WITH_ARG("--minion-chipreport",
+		     set_int_0_to_100, opt_show_intval, &opt_minion_chipreport,
+		     "Seconds to report chip 5min hashrate, range 0-100 (default: 0=disabled)"),
+	OPT_WITH_ARG("--minion-freq",
+		     opt_set_charp, NULL, &opt_minion_freq,
+		     "Set minion chip frequencies in MHz, single value or comma list, range 100-1400 (default: 1000)"),
+	OPT_WITH_ARG("--minion-cores",
+		     opt_set_charp, NULL, &opt_minion_cores,
+		     opt_hidden),
+	OPT_WITHOUT_ARG("--minion-idlecount",
+		     opt_set_bool, &opt_minion_idlecount,
+		     "Report when IdleCount is >0 or changes"),
+	OPT_WITHOUT_ARG("--minion-overheat",
+		     opt_set_bool, &opt_minion_overheat,
+		     "Enable directly halting any chip when the status exceeds 100C"),
+	OPT_WITH_ARG("--minion-temp",
+		     opt_set_charp, NULL, &opt_minion_temp,
+		     "Set minion chip temperature threshold, single value or comma list, range 120-160 (default: 135C)"),
+#endif
 #if defined(unix) || defined(__APPLE__)
 	OPT_WITH_ARG("--monitor|-m",
 		     opt_set_charp, NULL, &opt_stderr_cmd,
@@ -1380,8 +1435,13 @@ static struct opt_table opt_config_table[] = {
 	OPT_WITH_ARG("--retry-pause",
 		     set_null, NULL, &opt_set_null,
 		     opt_hidden),
+#ifdef USE_ICARUS
+	OPT_WITH_ARG("--rock-freq",
+		     set_float_125_to_500, &opt_show_floatval, &opt_rock_freq,
+		     "Set RockMiner frequency in MHz, range 125-500"),
+#endif
 	OPT_WITH_ARG("--rotate",
-		     set_rotate, opt_show_intval, &opt_rotate_period,
+		     set_rotate, NULL, &opt_set_null,
 		     "Change multipool strategy from failover to regularly rotate at N minutes"),
 	OPT_WITHOUT_ARG("--round-robin",
 		     set_rr, &pool_strategy,
@@ -1631,6 +1691,9 @@ static char *opt_verusage_and_exit(const char *extra)
 	printf("%s\nBuilt with "
 #ifdef USE_ANT_S1
 		"ant.S1 "
+#endif
+#ifdef USE_ANT_S2
+		"ant.S2 "
 #endif
 #ifdef USE_AVALON
 		"avalon "
@@ -2970,13 +3033,18 @@ share_result(json_t *val, json_t *res, json_t *err, const struct work *work,
 				reason[reasonLen + 2] = ')'; reason[reasonLen + 3] = '\0';
 				memcpy(disposition + 7, reasontmp, reasonLen);
 				disposition[6] = ':'; disposition[reasonLen + 7] = '\0';
-			} else if (work->stratum && err && json_is_array(err)) {
-				json_t *reason_val = json_array_get(err, 1);
-				char *reason_str;
+			} else if (work->stratum && err) {
+				if (json_is_array(err)) {
+					json_t *reason_val = json_array_get(err, 1);
+					char *reason_str;
 
-				if (reason_val && json_is_string(reason_val)) {
-					reason_str = (char *)json_string_value(reason_val);
-					snprintf(reason, 31, " (%s)", reason_str);
+					if (reason_val && json_is_string(reason_val)) {
+						reason_str = (char *)json_string_value(reason_val);
+						snprintf(reason, 31, " (%s)", reason_str);
+					}
+				} else if (json_is_string(err)) {
+					const char *s = json_string_value(err);
+					snprintf(reason, 31, " (%s)", s);
 				}
 			}
 
@@ -3473,22 +3541,22 @@ static void calc_diff(struct work *work, double known)
 	}
 }
 
+static unsigned char bench_hidiff_bins[16][160];
+static unsigned char bench_lodiff_bins[16][160];
+static unsigned char bench_target[32];
+
+/* Iterate over the lo and hi diff benchmark work items such that we find one
+ * diff 32+ share every 32 work items. */
 static void get_benchmark_work(struct work *work)
 {
-	// Use a random work block pulled from a pool
-	static uint8_t bench_block[] = { CGMINER_BENCHMARK_BLOCK };
-
-	size_t bench_size = sizeof(*work);
-	size_t work_size = sizeof(bench_block);
-	size_t min_size = (work_size < bench_size ? work_size : bench_size);
-	memset(work, 0, sizeof(*work));
-	memcpy(work, &bench_block, min_size);
+	work->work_difficulty = 32;
+	memcpy(work->target, bench_target, 32);
+	work->drv_rolllimit = 0;
 	work->mandatory = true;
 	work->pool = pools[0];
 	cgtime(&work->tv_getwork);
 	copy_time(&work->tv_getwork_reply, &work->tv_getwork);
 	work->getwork_mode = GETWORK_MODE_BENCHMARK;
-	calc_diff(work, 0);
 }
 
 static void benchfile_dspwork(struct work *work, uint32_t nonce)
@@ -3824,6 +3892,13 @@ static void sighandler(int __maybe_unused sig)
 	kill_work();
 }
 
+static void _stage_work(struct work *work);
+
+#define stage_work(WORK) do { \
+	_stage_work(WORK); \
+	WORK = NULL; \
+} while (0)
+
 #ifdef HAVE_LIBCURL
 /* Called with pool_lock held. Recruit an extra curl if none are available for
  * this pool. */
@@ -4010,13 +4085,6 @@ struct work *make_clone(struct work *work)
 	return work_clone;
 }
 
-static void _stage_work(struct work *work);
-
-#define stage_work(WORK) do { \
-	_stage_work(WORK); \
-	WORK = NULL; \
-} while (0)
-
 static bool clone_available(void)
 {
 	struct work *work_clone = NULL, *work, *tmp;
@@ -4163,6 +4231,16 @@ struct work *copy_work_noffset(struct work *base_work, int noffset)
 	_copy_work(work, base_work, noffset);
 
 	return work;
+}
+
+void pool_failed(struct pool *pool)
+{
+	if (!pool_tset(pool, &pool->idle)) {
+		cgtime(&pool->tv_idle);
+		if (pool == current_pool()) {
+			switch_pools(NULL);
+		}
+	}
 }
 
 static void pool_died(struct pool *pool)
@@ -6115,6 +6193,7 @@ static void *stratum_rthread(void *userdata)
 			if (!restart_stratum(pool)) {
 				pool_died(pool);
 				while (!restart_stratum(pool)) {
+					pool_failed(pool);
 					if (pool->removed)
 						goto out;
 					cgsleep_ms(30000);
@@ -6155,6 +6234,7 @@ static void *stratum_rthread(void *userdata)
 
 			pool_died(pool);
 			while (!restart_stratum(pool)) {
+				pool_failed(pool);
 				if (pool->removed)
 					goto out;
 				cgsleep_ms(30000);
@@ -6608,7 +6688,7 @@ retry_stratum:
 		}
 		applog(LOG_DEBUG, "FAILED to retrieve work from pool %u %s",
 		       pool->pool_no, pool->rpc_url);
-		if (!pinging)
+		if (!pinging && !pool->idle)
 			applog(LOG_WARNING, "Pool %u slow/down or URL or credentials invalid", pool->pool_no);
 	}
 out:
@@ -6772,7 +6852,6 @@ void submit_nonce2_nonce(struct thr_info *thr, uint32_t pool_no, uint32_t nonce2
 	pool->nonce2 = nonce2;
 	gen_stratum_work(pool, work);
 
-	work->device_diff = MIN(drv->working_diff, work->work_difficulty);
 	submit_nonce(thr, work, nonce);
 	free_work(work);
 }
@@ -7005,8 +7084,23 @@ int share_work_tdiff(struct cgpu_info *cgpu)
 	return last_getwork - cgpu->last_device_valid_work;
 }
 
+static void set_benchmark_work(struct cgpu_info *cgpu, struct work *work)
+{
+	cgpu->lodiff += cgpu->direction;
+	if (cgpu->lodiff < 1)
+		cgpu->direction = 1;
+	if (cgpu->lodiff > 15) {
+		cgpu->direction = -1;
+		if (++cgpu->hidiff > 15)
+			cgpu->hidiff = 0;
+		memcpy(work, &bench_hidiff_bins[cgpu->hidiff][0], 160);
+	} else
+		memcpy(work, &bench_lodiff_bins[cgpu->lodiff][0], 160);
+}
+
 struct work *get_work(struct thr_info *thr, const int thr_id)
 {
+	struct cgpu_info *cgpu = thr->cgpu;
 	struct work *work = NULL;
 	time_t diff_t;
 
@@ -7026,14 +7120,17 @@ struct work *get_work(struct thr_info *thr, const int thr_id)
 	 * device failures. */
 	if (diff_t > 0) {
 		applog(LOG_DEBUG, "Get work blocked for %d seconds", (int)diff_t);
-		thr->cgpu->last_device_valid_work += diff_t;
+		cgpu->last_device_valid_work += diff_t;
 	}
 	applog(LOG_DEBUG, "Got work from get queue to get work for thread %d", thr_id);
 
 	work->thr_id = thr_id;
+	if (opt_benchmark)
+		set_benchmark_work(cgpu, work);
+
 	thread_reportin(thr);
 	work->mined = true;
-	work->device_diff = MIN(thr->cgpu->drv->max_diff, work->work_difficulty);
+	work->device_diff = MIN(cgpu->drv->max_diff, work->work_difficulty);
 	return work;
 }
 
@@ -7044,6 +7141,22 @@ static void submit_work_async(struct work *work)
 	pthread_t submit_thread;
 
 	cgtime(&work->tv_work_found);
+	if (opt_benchmark) {
+		struct cgpu_info *cgpu = get_thr_cgpu(work->thr_id);
+
+		mutex_lock(&stats_lock);
+		cgpu->accepted++;
+		total_accepted++;
+		pool->accepted++;
+		cgpu->diff_accepted += work->work_difficulty;
+		total_diff_accepted += work->work_difficulty;
+		pool->diff_accepted += work->work_difficulty;
+		mutex_unlock(&stats_lock);
+
+		applog(LOG_NOTICE, "Accepted %s %d benchmark share nonce %08x",
+		       cgpu->drv->name, cgpu->device_id, *(uint32_t *)(work->data + 64 + 12));
+		return;
+	}
 
 	if (stale_work(work, true)) {
 		if (opt_submit_stale)
@@ -7270,7 +7383,7 @@ static void hash_sole_work(struct thr_info *mythr)
 				"mining thread %d", thr_id);
 			break;
 		}
-		work->device_diff = MIN(drv->working_diff, work->work_difficulty);
+		work->device_diff = MIN(drv->max_diff, work->work_difficulty);
 
 		do {
 			cgtime(&tv_start);
@@ -8535,6 +8648,7 @@ static void *test_pool_thread(void *arg)
 {
 	struct pool *pool = (struct pool *)arg;
 
+retry:
 	if (pool_active(pool, false)) {
 		pool_tset(pool, &pool->lagging);
 		pool_tclear(pool, &pool->idle);
@@ -8552,10 +8666,14 @@ static void *test_pool_thread(void *arg)
 		if (unlikely(first_pool))
 			applog(LOG_NOTICE, "Switching to pool %d %s - first alive pool", pool->pool_no, pool->rpc_url);
 
+		pool_tclear(pool, &pool->idle);
 		pool_resus(pool);
 		switch_pools(NULL);
-	} else
+	} else {
 		pool_died(pool);
+		sleep(5);
+		goto retry;
+	}
 
 	return NULL;
 }
@@ -8854,8 +8972,6 @@ void fill_device_drv(struct device_drv *drv)
 		drv->zero_stats = &noop_zero_stats;
 	if (!drv->max_diff)
 		drv->max_diff = 1;
-	if (!drv->working_diff)
-		drv->working_diff = 1;
 }
 
 void null_device_drv(struct device_drv *drv)
@@ -8891,7 +9007,6 @@ void null_device_drv(struct device_drv *drv)
 
 	drv->zero_stats = &noop_zero_stats;
 	drv->max_diff = 1;
-	drv->working_diff = 1;
 }
 
 void enable_device(struct cgpu_info *cgpu)
@@ -8922,6 +9037,20 @@ static void adjust_mostdevs(void)
 	if (total_devices - zombie_devs > most_devices)
 		most_devices = total_devices - zombie_devs;
 }
+
+#ifdef USE_ICARUS
+bool icarus_get_device_id(struct cgpu_info *cgpu)
+{
+	static struct _cgpu_devid_counter *devids = NULL;
+	struct _cgpu_devid_counter *d;
+
+	HASH_FIND_STR(devids, cgpu->drv->name, d);
+	if (d)
+		return (d->lastid + 1);
+	else
+		return 0;
+}
+#endif
 
 bool add_cgpu(struct cgpu_info *cgpu)
 {
@@ -9255,6 +9384,12 @@ int main(int argc, char *argv[])
 		enable_pool(pool);
 		pool->idle = false;
 		successful_connect = true;
+
+		for (i = 0; i < 16; i++) {
+			hex2bin(&bench_hidiff_bins[i][0], &bench_hidiffs[i][0], 160);
+			hex2bin(&bench_lodiff_bins[i][0], &bench_lodiffs[i][0], 160);
+		}
+		set_target(bench_target, 32);
 	}
 
 #ifdef HAVE_CURSES
@@ -9473,6 +9608,7 @@ int main(int argc, char *argv[])
 		if (!use_curses)
 			early_quit(0, "No servers could be used! Exiting.");
 #ifdef HAVE_CURSES
+		touchwin(logwin);
 		wrefresh(logwin);
 		halfdelay(10);
 		if (getch() != ERR)
